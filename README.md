@@ -36,6 +36,12 @@
 
 ## 快速开始
 
+### 🎨 使用 CC Switch（推荐）
+
+请查看 **[docs/CC_SWITCH_GUI_CONFIG.md](./docs/CC_SWITCH_GUI_CONFIG.md)** 🐾
+
+### 💻 命令行方式
+
 ```bash
 pnpm install        # 安装依赖
 pnpm capture-key    # 抓取 DEAP_API_KEY 写入 .env（首次 / 密钥过期时，需输一次 sudo）
@@ -196,6 +202,14 @@ A：这是 deap 网关的特殊行为——**流式请求不能带 `Accept: text
 
 **Q：`/health` 显示 `unhealthy`？**
 A：说明直连 deap 失败——检查 `DEAP_API_KEY` 是否过期、网络是否通。
+
+**Q：支持 Prompt Caching 吗？**
+A：**协议层面完全支持**，但实际缓存效果取决于 deap 后端的能力。
+- 本代理已实现 Anthropic Prompt Caching 协议的完整透传（`cache_control: {type: "ephemeral"}`）
+- 支持在 system、messages、tools 定义中标记缓存点
+- deap 后端会返回 `prompt_tokens_details.cached_tokens` 字段
+- 当前 deap 后端的 liteLLM 网关尚未启用真正的缓存命中（`cached_tokens` 始终为 0）
+- 一旦 deap 后端启用缓存，代理层无需改动即可自动透传命中数据
 
 ---
 

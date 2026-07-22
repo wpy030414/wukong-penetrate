@@ -17,6 +17,8 @@ import {
   AnthropicResponse,
   TextBlock,
   ToolUseBlock,
+  CacheControl,
+  Usage,
 } from './types';
 import { settings } from './config';
 import { DeapClient, DeapChatMessage, DeapTool, DeapToolCall } from './deapClient';
@@ -33,6 +35,97 @@ export class AnthropicAdapter {
         parameters: t.input_schema ?? { type: 'object', properties: {} },
       },
     }));
+  }
+
+  /**
+   * 从 Anthropic system 数组中提取 cache_control 标记
+   * 返回: { systemText: string, hasCacheControl: boolean, cacheControlIndex: number | undefined }
+   */
+  private static extractSystemCacheControl(
+    system: AnthropicRequest['system']
+  ): { systemText: string; hasCacheControl: boolean; cacheControlIndex?: number } {
+    if (!system) return { systemText: '', hasCacheControl: false };
+    if (typeof system === 'string') return { systemText: system, hasCacheControl: false };
+
+    let combinedText = '';
+    let cacheControlIndex: number | undefined;
+
+    for (let i = 0; i < system.length; i++) {
+      const item = system[i];
+      const text = typeof item === 'object' && item.text ? item.text :
+                   typeof item === 'string' ? item : '';
+      combinedText += text || '';
+
+      // 检查是否有 cache_control 标记
+      if (typeof item === 'object' && item.cache_control) {
+        cacheControlIndex = i;
+      }
+    }
+
+    return { systemText: combinedText, hasCacheControl: cacheControlIndex !== undefined, cacheControlIndex };
+  }
+
+  /**
+   * 从 message content 数组中检测 cache_control 标记
+   * 返回最后一个带 cache_control 的元素的索引
+   */
+  private static detectMessageCacheControl(content: any): number | undefined {
+    if (!Array.isArray(content)) return undefined;
+
+    for (let i = content.length - 1; i >= 0; i--) {
+      const block = content[i];
+      if (block && typeof block === 'object' && block.cache_control) {
+        return i;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * 从 tools 数组中检测 cache_control 标记
+   */
+  private static detectToolsCacheControl(tools: AnthropicRequest['tools']): number | undefined {
+    if (!tools) return undefined;
+
+    for (let i = tools.length - 1; i >= 0; i--) {
+      const tool = tools[i];
+      if (tool && typeof tool === 'object' && (tool as any).cache_control) {
+        return i;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * 构建 extra_body 用于传递给 deap 的缓存控制参数
+   */
+  private static buildExtraBody(
+    messages: DeapChatMessage[],
+    tools: AnthropicRequest['tools']
+  ): Record<string, any> | undefined {
+    const extraBody: any = {};
+
+    // 检测 tools 的 cache_control
+    const toolsCacheIdx = AnthropicAdapter.detectToolsCacheControl(tools);
+    if (toolsCacheIdx !== undefined) {
+      extraBody.cache_control = {
+        type: 'ephemeral',
+        tools_index: toolsCacheIdx
+      };
+    }
+
+    // 检查 messages 中是否有 _cache_control 标记（由 buildDeapMessages 注入）
+    const cachedMsgIndices = messages
+      .map((m, i) => (m as any)._cache_control ? i : -1)
+      .filter(i => i !== -1);
+    if (cachedMsgIndices.length > 0) {
+      extraBody.cache_control = {
+        ...(extraBody.cache_control || {}),
+        message_indices: cachedMsgIndices
+      };
+    }
+
+    return Object.keys(extraBody).length > 0 ? extraBody : undefined;
   }
 
   /** 翻译 Anthropic tool_choice → OpenAI tool_choice。 */
@@ -127,12 +220,24 @@ export class AnthropicAdapter {
   /**
    * 把 Anthropic 请求翻译成 OpenAI messages 数组。
    * system 提升为第一条 system 消息；逐条翻译 user/assistant。
+   * 同时检测并注入 cache_control 元数据。
    */
   static buildDeapMessages(request: AnthropicRequest): DeapChatMessage[] {
     const out: DeapChatMessage[] = [];
 
-    const sys = AnthropicAdapter.systemText(request.system);
-    if (sys) out.push({ role: 'system', content: sys });
+    // 处理 system 并提取 cache_control 信息
+    const sysResult = AnthropicAdapter.extractSystemCacheControl(request.system);
+    if (sysResult.systemText) {
+      const sysMsg: DeapChatMessage = { role: 'system', content: sysResult.systemText };
+      // 通过 _cache_control 传递缓存信息（内部使用，不会发送给 deap）
+      if (sysResult.hasCacheControl && sysResult.cacheControlIndex !== undefined) {
+        (sysMsg as any)._cache_control = {
+          enabled: true,
+          index: sysResult.cacheControlIndex
+        };
+      }
+      out.push(sysMsg);
+    }
 
     for (const msg of request.messages) {
       if (msg.role === 'assistant') {
@@ -142,11 +247,33 @@ export class AnthropicAdapter {
           const t = AnthropicAdapter.translateAssistantBlocks(msg.content as any[]);
           const m: DeapChatMessage = { role: 'assistant', content: t.content || null };
           if (t.tool_calls) m.tool_calls = t.tool_calls;
+
+          // 检测 message content 的 cache_control
+          const cacheIdx = AnthropicAdapter.detectMessageCacheControl(msg.content);
+          if (cacheIdx !== undefined) {
+            (m as any)._cache_control = {
+              enabled: true,
+              content_index: cacheIdx
+            };
+          }
+
           out.push(m);
         }
       } else {
-        // user（或 tool_result 载体）
-        out.push(...AnthropicAdapter.translateUserMessage(msg.content));
+        // user 消息
+        const userMsgs = AnthropicAdapter.translateUserMessage(msg.content);
+
+        // 检测 cache_control 并附加到对应的 message
+        const cacheIdx = AnthropicAdapter.detectMessageCacheControl(msg.content);
+        if (cacheIdx !== undefined && userMsgs.length > 0) {
+          const lastUserMsg = userMsgs[userMsgs.length - 1];
+          (lastUserMsg as any)._cache_control = {
+            enabled: true,
+            content_index: cacheIdx
+          };
+        }
+
+        out.push(...userMsgs);
       }
     }
     return out;
@@ -167,7 +294,17 @@ export class AnthropicAdapter {
     const toolChoice = AnthropicAdapter.buildToolChoice(request);
     const model = AnthropicAdapter.resolveModel(request);
 
-    const result = await deapClient.chat(messages, model, request.max_tokens, tools, toolChoice);
+    // 构建 extra_body 传递缓存元数据
+    const extraBody = AnthropicAdapter.buildExtraBody(messages, request.tools);
+
+    const result = await deapClient.chat(
+      messages,
+      model,
+      request.max_tokens,
+      tools,
+      toolChoice,
+      extraBody
+    );
 
     const content: (TextBlock | ToolUseBlock)[] = [];
     if (result.text) content.push({ type: 'text', text: result.text });
@@ -182,6 +319,19 @@ export class AnthropicAdapter {
     const inputTokens = result.usage?.prompt_tokens ?? request.messages.length * 100;
     const outputTokens = result.usage?.completion_tokens ?? Math.floor(result.text.length / 4);
 
+    // 构建 usage，包含缓存相关字段
+    const usage: Usage = {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      total_tokens: inputTokens + outputTokens,
+    };
+
+    // 如果 deap 返回了 prompt_tokens_details.cached_tokens，转换为 Anthropic 格式
+    const cachedTokens = (result.usage as any)?.prompt_tokens_details?.cached_tokens;
+    if (cachedTokens !== undefined && cachedTokens > 0) {
+      usage.cache_read_input_tokens = cachedTokens;
+    }
+
     return {
       id: `msg_${uuidv4().replace(/-/g, '').slice(0, 24)}`,
       type: 'message',
@@ -189,7 +339,7 @@ export class AnthropicAdapter {
       content,
       model: request.model,
       stop_reason: result.finishReason === 'tool_calls' ? 'tool_use' : 'end_turn',
-      usage: { input_tokens: inputTokens, output_tokens: outputTokens, total_tokens: inputTokens + outputTokens },
+      usage,
     };
   }
 
@@ -210,6 +360,9 @@ export class AnthropicAdapter {
     const toolChoice = AnthropicAdapter.buildToolChoice(request);
     const model = AnthropicAdapter.resolveModel(request);
     const inputTokens = request.messages.length * 100;
+
+    // 构建 extra_body 传递缓存元数据
+    const extraBody = AnthropicAdapter.buildExtraBody(messages, request.tools);
 
     let eventId = 0;
     const ev = (type: string, data: any) =>
@@ -233,6 +386,7 @@ export class AnthropicAdapter {
     let accumulatedText = '';
     let finalStop = 'end_turn';
     let outputTokens = 0;
+    let cachedTokens = 0;
 
     const closeBlock = function* (): Generator<string> {
       if (openBlock !== null) {
@@ -241,7 +395,7 @@ export class AnthropicAdapter {
       }
     };
 
-    for await (const e of deapClient.chatStream(messages, model, request.max_tokens, tools, toolChoice)) {
+    for await (const e of deapClient.chatStream(messages, model, request.max_tokens, tools, toolChoice, extraBody)) {
       if (e.kind === 'text') {
         if (openBlock !== 'text') {
           yield* closeBlock();
@@ -280,15 +434,23 @@ export class AnthropicAdapter {
       } else if (e.kind === 'done') {
         finalStop = e.finishReason === 'tool_calls' ? 'tool_use' : 'end_turn';
         outputTokens = e.usage?.completion_tokens ?? Math.floor(accumulatedText.length / 4);
+        // 提取缓存信息
+        cachedTokens = (e.usage as any)?.prompt_tokens_details?.cached_tokens ?? 0;
       }
     }
 
     yield* closeBlock();
 
+    // 构建 message_delta 的 usage
+    const deltaUsage: any = { output_tokens: outputTokens };
+    if (cachedTokens > 0) {
+      deltaUsage.cache_read_input_tokens = cachedTokens;
+    }
+
     yield ev('message_delta', {
       type: 'message_delta',
       delta: { stop_reason: finalStop },
-      usage: { output_tokens: outputTokens },
+      usage: deltaUsage,
     });
     yield ev('message_stop', { type: 'message_stop' });
   }

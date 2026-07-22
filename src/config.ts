@@ -25,6 +25,14 @@ export interface Settings {
   deapWukongDeviceType: string;
   deapAgentLoopVersion: string;
   deapBizParam: string;
+
+  // —— Prompt Caching 配置 ——
+  /** 是否启用 Prompt Caching 功能（默认开启，尽力而为透传给 deap） */
+  enablePromptCaching: boolean;
+  /** 缓存断点最大数量（Anthropic 限制为 4） */
+  maxCacheBreakpoints: number;
+  /** 是否在日志中输出缓存命中信息 */
+  logCacheStats: boolean;
 }
 
 export const settings: Settings = {
@@ -48,4 +56,9 @@ export const settings: Settings = {
   deapWukongDeviceType: process.env.DEAP_WUKONG_DEVICE_TYPE || '2',
   deapAgentLoopVersion: process.env.DEAP_AGENT_LOOP_VERSION || 'V2',
   deapBizParam: process.env.DEAP_BIZ_PARAM || '{"taskDes":"5L2g5aW9"}',
+
+  // Prompt Caching 配置
+  enablePromptCaching: process.env.ENABLE_PROMPT_CACHING !== 'false',  // 默认开启，除非显式设为 false
+  maxCacheBreakpoints: 4,
+  logCacheStats: process.env.LOG_CACHE_STATS === 'true',
 };

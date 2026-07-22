@@ -25,6 +25,12 @@ export interface DeapChatMessage {
   tool_calls?: DeapToolCall[];
   tool_call_id?: string;
   name?: string;
+  /** 内部使用的缓存控制元数据（不会发送给 deap，仅用于构建 extra_body） */
+  _cache_control?: {
+    enabled: boolean;
+    index?: number;
+    content_index?: number;
+  };
 }
 
 export interface DeapToolCall {
@@ -92,6 +98,8 @@ export class DeapClient {
   /**
    * 组请求体。流式必须带 stream_options / temperature / enable_thinking / extra_body，
    * 否则返回 406。tools / tool_choice 直接透传（deap 走标准 function calling）。
+   *
+   * @param extraBody 额外的参数对象，用于传递缓存控制等高级功能
    */
   private buildBody(
     messages: DeapChatMessage[],
@@ -100,9 +108,17 @@ export class DeapClient {
     maxTokens?: number,
     tools?: DeapTool[],
     toolChoice?: any,
+    extraBody?: Record<string, any>,
   ) {
     const userQuery =
       messages.filter((m) => m.role === 'user').map((m) => m.content).filter(Boolean).pop() || '';
+
+    // 清理消息中的内部字段
+    const cleanMessages = messages.map(m => {
+      const { _cache_control, ...cleanMsg } = m as any;
+      return cleanMsg;
+    });
+
     return {
       model: model || settings.wukongModel,
       stream,
@@ -110,8 +126,13 @@ export class DeapClient {
       temperature: 0.6,
       enable_thinking: false,
       ...(stream ? { stream_options: { include_usage: true } } : {}),
-      extra_body: { enable_thinking: false, user_query: typeof userQuery === 'string' ? userQuery : '' },
-      messages,
+      extra_body: {
+        enable_thinking: false,
+        user_query: typeof userQuery === 'string' ? userQuery : '',
+        // 合并传入的 extra_body（包含 cache_control）
+        ...extraBody,
+      },
+      messages: cleanMessages,
       ...(tools && tools.length > 0 ? { tools, tool_choice: toolChoice ?? 'auto' } : {}),
     };
   }
@@ -123,8 +144,9 @@ export class DeapClient {
     maxTokens?: number,
     tools?: DeapTool[],
     toolChoice?: any,
+    extraBody?: Record<string, any>,
   ): Promise<DeapChatResult> {
-    const body = this.buildBody(messages, model, false, maxTokens, tools, toolChoice);
+    const body = this.buildBody(messages, model, false, maxTokens, tools, toolChoice, extraBody);
 
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -176,8 +198,9 @@ export class DeapClient {
     maxTokens?: number,
     tools?: DeapTool[],
     toolChoice?: any,
+    extraBody?: Record<string, any>,
   ): AsyncGenerator<DeapStreamEvent> {
-    const body = this.buildBody(messages, model, true, maxTokens, tools, toolChoice);
+    const body = this.buildBody(messages, model, true, maxTokens, tools, toolChoice, extraBody);
 
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -195,7 +218,7 @@ export class DeapClient {
     const reader = (res.body as any).getReader();
 
     let finishReason = 'stop';
-    let usage: { prompt_tokens: number; completion_tokens: number } | undefined;
+    let usage: { prompt_tokens: number; completion_tokens: number; prompt_tokens_details?: { cached_tokens: number } } | undefined;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -228,6 +251,7 @@ export class DeapClient {
             usage = {
               prompt_tokens: json.usage.prompt_tokens,
               completion_tokens: json.usage.completion_tokens,
+              prompt_tokens_details: json.usage.prompt_tokens_details,
             };
           }
 
