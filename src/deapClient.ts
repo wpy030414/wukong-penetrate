@@ -1,18 +1,18 @@
 /**
  * DeapClient — 直接调用钉钉 deap 网关的客户端（本代理唯一后端）。
  *
- * 拿「登录态换来的 deap API Key」直连
+ * 拿「deap API Key」直连
  *   POST https://api-deap.dingtalk.com/dingtalk/v1/chat/completions
  * deap 说 OpenAI 兼容协议（chat/completions，支持 SSE 流式 + function calling）。
  *
  * 本客户端负责：
  *   - 透传结构化的 OpenAI messages（含 tool_calls / role:tool）与 tools 定义
  *   - 注入完整的一组 x-dingtalk-* / x-wukong-* 头（缺一个都会 400）
- *   - 解析非流式 JSON / 流式 SSE，产出文本增量 与 工具调用增量（跳过 reasoning_content）
+ *   - 解析非流式 JSON / 流式 SSE，产出文本增量、思考增量(thinking) 与 工具调用增量
+ *   - 模型 403 不可用时自动兜底到 wukongModel 并缓存；550 无渠道时带退避重试
  *
- * Key 的来源：登录成功后 DingTalkReal 经
- *   getCliAuthCode → claimGlobalTaskToken → createTempApiKey
- * 铸出的临时密钥（约 29 天有效）。抓取流程见 docs/CAPTURE_DEAP_KEY.md。
+ * Key 的来源：本机已登录的悟空 daemon 调 deap 时挂在 Authorization 头上的临时密钥
+ * （约 29 天有效）。本代理通过 MITM 代理截获该 Bearer token，抓取流程见 docs/CAPTURE_DEAP_KEY.md。
  */
 
 import { randomUUID } from 'crypto';
@@ -25,12 +25,6 @@ export interface DeapChatMessage {
   tool_calls?: DeapToolCall[];
   tool_call_id?: string;
   name?: string;
-  /** 内部使用的缓存控制元数据（不会发送给 deap，仅用于构建 extra_body） */
-  _cache_control?: {
-    enabled: boolean;
-    index?: number;
-    content_index?: number;
-  };
 }
 
 export interface DeapToolCall {
@@ -48,30 +42,122 @@ export interface DeapTool {
   };
 }
 
-/** 非流式的完整结果：正文 + 可选的工具调用 + 真实 usage */
+/** deap 返回的 usage（含可选的缓存命中 token 数）。 */
+export type DeapUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  prompt_tokens_details?: { cached_tokens: number };
+};
+
+/** 非流式的完整结果：正文 + 可选的思考链 + 可选的工具调用 + 真实 usage */
 export interface DeapChatResult {
   text: string;
+  /** deap 返回的 reasoning_content（仅 enable_thinking=true 时有值） */
+  reasoning?: string;
   toolCalls: DeapToolCall[];
   finishReason: string;
-  usage?: { prompt_tokens: number; completion_tokens: number };
+  usage?: DeapUsage;
 }
 
-/** 流式产出的事件：文本增量、工具调用增量，或最终的 finish/usage */
+/** 流式产出的事件：文本增量、思考增量、工具调用增量，或最终的 finish/usage */
 export type DeapStreamEvent =
+  | { kind: 'thinking'; thinking: string }
   | { kind: 'text'; text: string }
   | { kind: 'tool_call_start'; index: number; id: string; name: string }
   | { kind: 'tool_call_args'; index: number; args: string }
-  | { kind: 'done'; finishReason: string; usage?: { prompt_tokens: number; completion_tokens: number } };
+  | { kind: 'done'; finishReason: string; usage?: DeapUsage };
 
 export class DeapClient {
   private apiKey: string;
   private baseUrl: string;
+  /** 已被 deap 判定不可用的模型缓存（model → 过期时间戳），避免重复撞 403 */
+  private unavailableCache = new Map<string, number>();
 
   constructor(apiKey?: string, baseUrl?: string) {
     this.apiKey = apiKey || settings.deapApiKey || '';
     this.baseUrl = (baseUrl || settings.deapBaseUrl).replace(/\/$/, '');
     if (!this.apiKey) {
       throw new Error('DEAP_API_KEY is not configured. Set it in .env or env.');
+    }
+  }
+
+  /**
+   * 判断一个错误是否「可重试」：deap 对第三方模型（claude/gpt）的动态渠道池
+   * 间歇性返回 550 "No available channel"（及其它 5xx），重试同一模型通常能命中空闲渠道。
+   * 4xx（鉴权 / 参数类错误）不重试。
+   */
+  private isRetriableError(status: number, body: string): boolean {
+    if (status >= 500) return true;
+    // 少数情况下 4xx body 里带 channel 字样也视作可重试
+    if (status >= 400 && /no available channel|channel/i.test(body)) return true;
+    return false;
+  }
+
+  /** 指数退避：第 attempt 次重试等待 base * 2^(attempt) 毫秒。 */
+  private backoff(attempt: number): Promise<void> {
+    const ms = settings.channelRetryBaseMs * Math.pow(2, attempt);
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /** deap 是否明确表示「该模型不可用」（403 + requested model is not available）。 */
+  private isModelUnavailable(status: number, body: string): boolean {
+    return status === 403 && /requested model is not available/i.test(body);
+  }
+
+  /** 该模型是否在「已知不可用」缓存中（且未过期）。 */
+  private isKnownUnavailable(model: string): boolean {
+    const exp = this.unavailableCache.get(model);
+    return !!exp && exp > Date.now();
+  }
+
+  /** 标记某模型不可用，缓存一个 TTL（到期后允许重新验证，模型可能恢复可用）。 */
+  private markUnavailable(model: string): void {
+    if (!model) return;
+    this.unavailableCache.set(model, Date.now() + settings.modelAvailabilityTtlMs);
+  }
+
+  /**
+   * 带模型兜底（403）+ 渠道重试（550）的统一 fetch。chat/chatStream 共用，消除重复循环。
+   * @param label 日志/错误信息前缀（'chat' / 'stream'）。成功返回 Response（已 res.ok）。
+   */
+  private async fetchWithRetry(
+    messages: DeapChatMessage[],
+    stream: boolean,
+    maxTokens: number | undefined,
+    tools: DeapTool[] | undefined,
+    toolChoice: any,
+    extraBody: Record<string, any> | undefined,
+    enableThinking: boolean | undefined,
+    initialModel: string | undefined,
+    label: string,
+  ): Promise<Response> {
+    let useModel = initialModel && !this.isKnownUnavailable(initialModel) ? initialModel : settings.wukongModel;
+    let fallbackTried = useModel === settings.wukongModel;
+    for (let attempt = 0; ; attempt++) {
+      const body = this.buildBody(messages, useModel, stream, maxTokens, tools, toolChoice, extraBody, enableThinking);
+      const res = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: this.buildHeaders(),
+        body: JSON.stringify(body),
+      });
+      if (res.ok) return res;
+      const text = await res.text().catch(() => '');
+      // 模型不可用（403）→ 动态兜底到 wukongModel（仅一次）
+      if (this.isModelUnavailable(res.status, text) && !fallbackTried) {
+        this.markUnavailable(useModel);
+        console.warn(`[deap ${label}] 模型 "${useModel}" 不可用（403），动态兜底到 "${settings.wukongModel}"`);
+        useModel = settings.wukongModel;
+        fallbackTried = true;
+        attempt = -1; // 兜底模型重新计重试
+        continue;
+      }
+      // 渠道错误（550 等）→ 重试同一模型
+      if (this.isRetriableError(res.status, text) && attempt < settings.channelRetryMax) {
+        console.warn(`[deap ${label}] 可重试错误，第 ${attempt + 1}/${settings.channelRetryMax} 次重试：HTTP ${res.status} ${text.slice(0, 200)}`);
+        await this.backoff(attempt);
+        continue;
+      }
+      throw new Error(`deap ${label} failed: HTTP ${res.status} ${text.slice(0, 300)}`);
     }
   }
 
@@ -109,30 +195,25 @@ export class DeapClient {
     tools?: DeapTool[],
     toolChoice?: any,
     extraBody?: Record<string, any>,
+    enableThinking?: boolean,
   ) {
     const userQuery =
       messages.filter((m) => m.role === 'user').map((m) => m.content).filter(Boolean).pop() || '';
-
-    // 清理消息中的内部字段
-    const cleanMessages = messages.map(m => {
-      const { _cache_control, ...cleanMsg } = m as any;
-      return cleanMsg;
-    });
 
     return {
       model: model || settings.wukongModel,
       stream,
       max_tokens: maxTokens ?? 4096,
       temperature: 0.6,
-      enable_thinking: false,
+      enable_thinking: enableThinking ?? false,
       ...(stream ? { stream_options: { include_usage: true } } : {}),
       extra_body: {
-        enable_thinking: false,
+        enable_thinking: enableThinking ?? false,
         user_query: typeof userQuery === 'string' ? userQuery : '',
         // 合并传入的 extra_body（包含 cache_control）
         ...extraBody,
       },
-      messages: cleanMessages,
+      messages,
       ...(tools && tools.length > 0 ? { tools, tool_choice: toolChoice ?? 'auto' } : {}),
     };
   }
@@ -145,20 +226,9 @@ export class DeapClient {
     tools?: DeapTool[],
     toolChoice?: any,
     extraBody?: Record<string, any>,
+    enableThinking?: boolean,
   ): Promise<DeapChatResult> {
-    const body = this.buildBody(messages, model, false, maxTokens, tools, toolChoice, extraBody);
-
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: this.buildHeaders(),
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`deap chat failed: HTTP ${res.status} ${text.slice(0, 300)}`);
-    }
-
+    const res = await this.fetchWithRetry(messages, false, maxTokens, tools, toolChoice, extraBody, enableThinking, model, 'chat');
     const data: any = await res.json();
     const choice = data?.choices?.[0];
     const msg = choice?.message ?? {};
@@ -178,8 +248,14 @@ export class DeapClient {
         }))
       : [];
 
+    const reasoning =
+      typeof msg.reasoning_content === 'string' && msg.reasoning_content.length > 0
+        ? msg.reasoning_content
+        : undefined;
+
     return {
       text,
+      reasoning,
       toolCalls,
       finishReason: choice?.finish_reason ?? 'stop',
       usage: data?.usage
@@ -199,26 +275,18 @@ export class DeapClient {
     tools?: DeapTool[],
     toolChoice?: any,
     extraBody?: Record<string, any>,
+    enableThinking?: boolean,
   ): AsyncGenerator<DeapStreamEvent> {
-    const body = this.buildBody(messages, model, true, maxTokens, tools, toolChoice, extraBody);
-
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: this.buildHeaders(),
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`deap stream failed: HTTP ${res.status} ${text.slice(0, 300)}`);
-    }
+    // 403 模型兜底 + 550 渠道重试统一在 fetchWithRetry（首字节前可安全切换模型）
+    const res = await this.fetchWithRetry(messages, true, maxTokens, tools, toolChoice, extraBody, enableThinking, model, 'stream');
+    if (!res.body) throw new Error('deap stream failed: empty body');
 
     const decoder = new TextDecoder();
     let buffer = '';
     const reader = (res.body as any).getReader();
 
     let finishReason = 'stop';
-    let usage: { prompt_tokens: number; completion_tokens: number; prompt_tokens_details?: { cached_tokens: number } } | undefined;
+    let usage: DeapUsage | undefined;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -261,7 +329,12 @@ export class DeapClient {
 
           const delta = choice.delta ?? {};
 
-          // 正文增量（跳过 reasoning_content 思维链）
+          // 思考增量（reasoning_content，仅 enable_thinking=true 时有）
+          if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+            yield { kind: 'thinking', thinking: delta.reasoning_content };
+          }
+
+          // 正文增量
           if (typeof delta.content === 'string' && delta.content.length > 0) {
             yield { kind: 'text', text: delta.content };
           }

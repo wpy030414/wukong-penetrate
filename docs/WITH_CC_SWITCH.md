@@ -1,6 +1,6 @@
-# 使用 CC Switch GUI 配置本项目
+# 使用 CC Switch 配置本项目
 
-[CC Switch](https://github.com/farion1231/cc-switch) 是一个 Claude Code 配置管理工具，提供了图形化界面来管理 Claude Code 的各项设置。通过 CC Switch，你可以更方便地配置本项目与 Claude Code 的集成。
+[CC Switch](https://github.com/farion1231/cc-switch) 是一个 Agent 供应商配置管理工具，支持管理 Claude Code。你可以用它更方便地配置本项目与 Claude Code 的集成。
 
 ## 前置要求
 
@@ -18,20 +18,18 @@
 pnpm serve
 ```
 
-服务默认运行在 `http://localhost:8000`。
+服务默认运行在 `http://localhost:19067`。
 
-### 2. 在 CC Switch 中添加新的 API 端点
-
-在 CC Switch 中：
+### 2. 在 CC Switch 中添加新的配置
 
 1. **增加新的自定义配置供应商**
 2. **填写以下信息**：
    - **供应商名称**: `Wukong Anthropic Proxy`
-   - **请求地址**: `http://localhost:8000`
+   - **请求地址**: `http://localhost:19067`
    - **API Key**: （随便填，除非你在 `.env` 中设置了 `API_KEY`）
    - **模型名称**: `dingtalk-auto`
 
-3. **保存配置**
+3. **保存并启用此配置**
 
 ## 使用效果
 
@@ -48,7 +46,7 @@ pnpm serve
 
 A：在 CC Switch 中选择其他配置即可，随时切换。
 
-### Q：代理端口不是 8000 怎么办？
+### Q：代理端口不是 19067 怎么办？
 
 A：在 `.env` 中修改 `PORT` 环境变量，然后在 CC Switch 中更新 Base URL。
 

@@ -313,7 +313,7 @@ function cleanup(): void {
     if (!writeEnv(key)) { process.exitCode = 1; return; }
 
     console.log(`\n🎉 完成！抓到 key ${mask(key)} 并已写入 .env。`);
-    console.log('   重启代理后生效：lsof -ti :8000 | xargs kill -9; pnpm serve\n');
+    console.log('   重启代理后生效：lsof -ti :19067 | xargs kill -9; pnpm serve\n');
   } finally {
     cleanup();
   }

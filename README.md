@@ -5,8 +5,8 @@
 任何能调 Anthropic API 的客户端（官方 SDK、LangChain、Claude Code、各类 IDE 插件……）都可以**零改造地改指到本地**，直接驱动悟空背后的通义千问模型，并**完整支持 function calling（tools）**。
 
 ```
-你的客户端  --(Anthropic /v1/messages)-->  本代理  --(HTTPS)-->  deap 网关  -->  qwen3.7-plus
-                                              (OpenAI 兼容协议 + DEAP_API_KEY 鉴权)
+你的客户端  --(Anthropic /v1/messages)-->  本代理  --(HTTPS)-->  deap 多模型网关
+                                              (dingtalk-auto→qwen3.7-plus / claude-opus-4-8 / gpt-4o)
 ```
 
 悟空 App 在这条链里**只在「抓密钥」那一刻用到**，运行时代理完全不碰悟空。
@@ -38,7 +38,7 @@
 
 ### 🎨 使用 CC Switch（推荐）
 
-请查看 **[docs/CC_SWITCH_GUI_CONFIG.md](./docs/CC_SWITCH_GUI_CONFIG.md)** 🐾
+请查看 **[docs/WITH_CC_SWITCH.md](./docs/WITH_CC_SWITCH.md)** 🐾
 
 ### 💻 命令行方式
 
@@ -48,14 +48,14 @@ pnpm capture-key    # 抓取 DEAP_API_KEY 写入 .env（首次 / 密钥过期时
 pnpm serve          # 启动服务（热重载：tsx watch）
 ```
 
-服务默认运行在 **`http://localhost:8000`**。
+服务默认运行在 **`http://localhost:19067`**。
 
 > `pnpm serve` 启动时会自动检测并释放被占用的端口（`lsof`+`kill`），重复启动不会报 `EADDRINUSE`。
 
 验证：
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:19067/health
 # => {"status":"healthy","backend":"deap","deap_available":true}
 ```
 
@@ -69,10 +69,14 @@ curl http://localhost:8000/health
 |------|--------|------|
 | `DEAP_API_KEY` | *空（必填）* | 直连 deap 用的临时密钥（`sk-…`），见下 |
 | `DEAP_BASE_URL` | `https://api-deap.dingtalk.com/dingtalk/v1` | deap 网关地址 |
-| `WUKONG_MODEL` | `dingtalk-auto` | 发给 deap 的模型名（deap 会路由到 `qwen3.7-plus`） |
-| `DEFAULT_MODEL` | `claude-3-5-sonnet-20241022` | 对外默认模型名，用于判断是否透传请求里的 `model` |
+| `WUKONG_MODEL` | `dingtalk-auto` | 兜底模型（模型不可用时回退；`dingtalk-auto`→`qwen3.7-plus`） |
+| `AVAILABLE_MODELS` | `dingtalk-auto,claude-opus-4-8,gpt-4o` | `/v1/models` 展示的候选模型（实际可用性由 deap 运行时验证） |
+| `ENABLE_EXTENDED_THINKING` | `false` | 请求未显式声明时，是否默认开启 Extended Thinking |
+| `CHANNEL_RETRY_MAX` | `3` | 第三方模型 `550` 无可用渠道时的重试次数 |
+| `CHANNEL_RETRY_BASE_MS` | `400` | 重试退避基数（毫秒，指数增长） |
+| `MODEL_AVAILABILITY_TTL_MS` | `600000` | 失效模型名缓存 TTL（默认 10 分钟，过期重新验证） |
 | `HOST` | `0.0.0.0` | 监听地址 |
-| `PORT` | `8000` | 监听端口 |
+| `PORT` | `19067` | 监听端口 |
 | `API_KEY` | *空* | 设置后，所有 `/v1/*` 请求必须带匹配的 `x-api-key` 头 |
 
 另有 8 个 `DEAP_*` 业务头变量（`DEAP_USER_TYPE`、`DEAP_SCENARIO_CODE` 等，缺一会被 deap 拒），默认值来自真实 App 抓包，一般不用改。
@@ -84,7 +88,8 @@ BACKEND=deap
 DEAP_API_KEY=sk-你的密钥
 DEAP_BASE_URL=https://api-deap.dingtalk.com/dingtalk/v1
 WUKONG_MODEL=dingtalk-auto
-PORT=8000
+AVAILABLE_MODELS=dingtalk-auto,claude-opus-4-8,gpt-4o
+PORT=19067
 ```
 
 ### 🔑 如何拿到 `DEAP_API_KEY`
@@ -106,7 +111,7 @@ from anthropic import Anthropic
 
 client = Anthropic(
     api_key="any-string",                 # 若服务端没设 API_KEY，这里随便填
-    base_url="http://localhost:8000"      # 注意：不要加 /v1，SDK 会自动补
+    base_url="http://localhost:19067"      # 注意：不要加 /v1，SDK 会自动补
 )
 
 # 非流式
@@ -132,7 +137,7 @@ with client.messages.stream(
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
 
-const client = new Anthropic({ apiKey: "any-string", baseURL: "http://localhost:8000" });
+const client = new Anthropic({ apiKey: "any-string", baseURL: "http://localhost:19067" });
 
 const msg = await client.messages.create({
   model: "claude-3-5-sonnet-20241022",
@@ -146,7 +151,7 @@ console.log(msg.content[0].text);
 
 ```bash
 # 非流式
-curl http://localhost:8000/v1/messages \
+curl http://localhost:19067/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-3-5-sonnet-20241022",
@@ -155,7 +160,7 @@ curl http://localhost:8000/v1/messages \
   }'
 
 # 流式（stream: true，返回 SSE）
-curl -N http://localhost:8000/v1/messages \
+curl -N http://localhost:19067/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-3-5-sonnet-20241022",
@@ -176,12 +181,14 @@ curl -N http://localhost:8000/v1/messages \
 | `/` | GET | 否 | 服务信息（版本、后端、tools 支持） |
 | `/health` | GET | 否 | 健康检查，会实际向 deap 发一句「你好」探测 |
 | `/v1/messages` | POST | 是 | **核心端点**，Anthropic Messages API，支持 `stream` 与 `tools` |
-| `/v1/models` | GET | 是 | 返回模型列表（`dingtalk-auto`，deap 实际都路由到 `qwen3.7-plus`） |
+| `/v1/models` | GET | 是 | 返回候选模型列表（默认 `dingtalk-auto` / `claude-opus-4-8` / `gpt-4o`） |
 | `/user/balance` | GET | 否 | 「余额查询」彩蛋 mock，供某些客户端探活 |
 
 ### 关于模型选择
 
-deap 网关的 `/models` 列表不开放，且本项目的 key 属 `AI_WUKONG` 业务线，**所有模型名都被路由到同一个底层模型 `qwen3.7-plus`**。因此 `/v1/models` 只如实返回 `dingtalk-auto`，请求里的 `model` 字段填什么基本不影响结果——真正起作用的是服务端的 `WUKONG_MODEL`。
+deap 是**多模型网关**：`dingtalk-auto` 路由到通义千问 `qwen3.7-plus`，而 `claude-opus-4-8` / `gpt-4o` 分别走**真 Claude / 真 GPT**（实测可用）。代理**信任客户端请求里的 `model` 字段**直接透传给 deap；若 deap 返回 `403 model not available`（模型名失效），自动兜底到 `WUKONG_MODEL`（`dingtalk-auto`）并短期缓存。`/v1/models` 返回 `AVAILABLE_MODELS` 配置的候选列表供客户端发现。
+
+> ⚠️ 第三方模型（claude/gpt）依赖 deap 的动态渠道池，偶发 `550 No available channel`——代理会自动带退避重试（`CHANNEL_RETRY_MAX` 次），通常 1-2 次内恢复。
 
 ### 关于 tools
 

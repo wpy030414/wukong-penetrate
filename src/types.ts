@@ -5,52 +5,8 @@ export interface CacheControl {
   type: 'ephemeral';  // 目前只支持 ephemeral（临时缓存）
 }
 
-/** 带缓存控制的文本块 */
-export interface CachedTextContent {
-  type: 'text';
-  text: string;
-  cache_control?: CacheControl;
-}
-
-/** 带缓存控制的 Image 块（预留） */
-export interface CachedImageContent {
-  type: 'image';
-  source: {
-    type: 'base64' | 'url';
-    media_type: string;
-    data: string;
-  };
-  cache_control?: CacheControl;
-}
-
-export interface TextContent {
-  type: 'text';
-  text: string;
-}
-
-/** 工具调用（assistant 产出） */
-export interface ToolUseContent {
-  type: 'tool_use';
-  id: string;
-  name: string;
-  input: Record<string, any>;
-}
-
-/** 工具结果（user 回传） */
-export interface ToolResultContent {
-  type: 'tool_result';
-  tool_use_id: string;
-  content?: string | { type: string; text?: string }[];
-  is_error?: boolean;
-}
-
-export type ContentBlock =
-  | TextContent
-  | ToolUseContent
-  | ToolResultContent
-  | CachedTextContent
-  | CachedImageContent
-  | Record<string, any>;
+/** Anthropic 消息内容块（结构透传，由 deap 运行时验证） */
+export type ContentBlock = Record<string, any>;
 
 export interface Message {
   role: string;
@@ -76,6 +32,8 @@ export interface AnthropicRequest {
   top_k?: number;
   tools?: AnthropicTool[];
   tool_choice?: { type: 'auto' | 'any' | 'tool' | 'none'; name?: string };
+  /** Extended Thinking：type='enabled' 时透传给 deap 的 enable_thinking=true */
+  thinking?: { type: 'enabled' | 'disabled'; budget_tokens?: number };
   metadata?: {
     user_id?: string;
     [key: string]: any;
@@ -94,6 +52,16 @@ export interface ToolUseBlock {
   input: Record<string, any>;
 }
 
+/**
+ * 扩展思考块（透传 deap 的 reasoning_content）。
+ * signature 为透传占位值（deap 不提供签名），回传历史消息时会被 adapter 丢弃。
+ */
+export interface ThinkingBlock {
+  type: 'thinking';
+  thinking: string;
+  signature?: string;
+}
+
 export interface Usage {
   input_tokens: number;
   output_tokens: number;
@@ -107,14 +75,8 @@ export interface AnthropicResponse {
   id: string;
   type: 'message';
   role: 'assistant';
-  content: (TextBlock | ToolUseBlock)[];
+  content: (ThinkingBlock | TextBlock | ToolUseBlock)[];
   model: string;
   stop_reason?: string;
   usage: Usage;
-}
-
-export interface StreamEvent {
-  type: string;
-  index?: number;
-  delta?: Record<string, any>;
 }

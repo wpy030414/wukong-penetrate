@@ -70,7 +70,7 @@ function verifyApiKey(req: Request, res: Response, next: NextFunction) {
 }
 
 // 根路径
-app.get('/', (req: Request, res: Response) => {
+app.get('/', (_req: Request, res: Response) => {
   res.json({
     service: 'wukong-penetrate',
     version: '0.1.0',
@@ -78,12 +78,14 @@ app.get('/', (req: Request, res: Response) => {
     backend: 'deap',
     deap_configured: Boolean(settings.deapApiKey),
     tools_supported: true,
+    default_model: settings.wukongModel,
+    available_models: settings.availableModels,
     endpoints: { messages: '/v1/messages', health: '/health', models: '/v1/models' },
   });
 });
 
 // 健康检查
-app.get('/health', async (req: Request, res: Response) => {
+app.get('/health', async (_req: Request, res: Response) => {
   const isHealthy = await deapClient.healthCheck();
   res.json({ status: isHealthy ? 'healthy' : 'unhealthy', backend: 'deap', deap_available: isHealthy });
 });
@@ -121,25 +123,32 @@ app.post('/v1/messages', verifyApiKey, async (req: Request, res: Response) => {
   }
 });
 
-// 模型列表：deap 只路由到一个底层模型，写死返回 dingtalk-auto
-app.get('/v1/models', verifyApiKey, async (req: Request, res: Response) => {
-  res.json({
-    object: 'list',
-    data: [
-      {
-        id: 'dingtalk-auto',
-        object: 'model',
-        created: 1699000000,
-        owned_by: 'dingtalk',
-        display_name: 'DingTalk Auto (Qwen)',
-        capabilities: ['text', 'tools'],
-      },
-    ],
+// 模型元数据：display_name / owned_by / capabilities（仅用于 /v1/models 展示，不参与路由）
+const MODEL_META: Record<string, { display_name: string; owned_by: string; capabilities: string[] }> = {
+  'dingtalk-auto': { display_name: 'DingTalk Auto · Qwen3.7-Plus', owned_by: 'dingtalk', capabilities: ['text', 'tools'] },
+  'claude-opus-4-8': { display_name: 'Claude Opus 4.8', owned_by: 'anthropic', capabilities: ['text', 'tools', 'thinking'] },
+  'gpt-4o': { display_name: 'GPT-4o', owned_by: 'openai', capabilities: ['text', 'tools'] },
+};
+
+// 模型列表：展示候选模型（供客户端发现/选择）。实际可用性由 deap 运行时动态验证——
+// deapClient 收到 403 "model not available" 会自动兜底到 wukongModel，无需此处保证准确。
+app.get('/v1/models', verifyApiKey, async (_req: Request, res: Response) => {
+  const data = settings.availableModels.map((id) => {
+    const meta = MODEL_META[id] ?? { display_name: id, owned_by: 'dingtalk', capabilities: ['text', 'tools'] };
+    return {
+      id,
+      object: 'model',
+      created: 1699000000,
+      owned_by: meta.owned_by,
+      display_name: meta.display_name,
+      capabilities: meta.capabilities,
+    };
   });
+  res.json({ object: 'list', data });
 });
 
 // 余额查询（mock 彩蛋，供某些客户端探活）
-app.get('/user/balance', (req: Request, res: Response) => {
+app.get('/user/balance', (_req: Request, res: Response) => {
   res.json({ isValid: true, remaining: 114514.1919, unit: '算粒' });
 });
 
@@ -150,7 +159,6 @@ async function startServer() {
   await killPortProcess(port);
   app.listen(port, host, () => {
     console.log(`🚀 wukong-penetrate running at http://${host}:${port}`);
-    console.log(`   backend=deap  tools=supported  docs: http://${host}:${port}/`);
   });
 }
 
