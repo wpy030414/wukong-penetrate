@@ -147,9 +147,22 @@ app.get('/v1/models', verifyApiKey, async (_req: Request, res: Response) => {
   res.json({ object: 'list', data });
 });
 
-// 余额查询（mock 彩蛋，供某些客户端探活）
-app.get('/user/balance', (_req: Request, res: Response) => {
-  res.json({ isValid: true, remaining: 114514.1919, unit: '算粒' });
+// 余额查询（供客户端探活）。真实探测 deap：若返回 402 quotaExceeded 则显示负余额。
+app.get('/user/balance', async (_req: Request, res: Response) => {
+  try {
+    // 发一个最便宜的请求探测 deap 余额状态
+    await deapClient.chat([{ role: 'user', content: 'hi' }]);
+    res.json({ isValid: true, remaining: 1919, unit: '算粒' });
+  } catch (error: any) {
+    const msg = error.message || '';
+    // 402 quotaExceeded → 余额不足
+    if (msg.includes('402') && /quotaExceeded|quota limit reached/i.test(msg)) {
+      res.json({ isValid: false, remaining: -114514, unit: '算粒' });
+    } else {
+      // 其他错误（如 401 无效密钥）也视作无效，但显示不同错误码
+      res.json({ isValid: false, remaining: 0, unit: '算粒', error: msg.slice(0, 100) });
+    }
+  }
 });
 
 // 启动服务器
