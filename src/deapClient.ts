@@ -16,6 +16,7 @@
  */
 
 import { randomUUID } from 'crypto';
+import Table from 'cli-table3';
 import { settings } from './config';
 
 /** OpenAI 风格的消息（content 可为字符串或结构化数组，支持工具调用） */
@@ -68,16 +69,163 @@ export type DeapStreamEvent =
   | { kind: 'done'; finishReason: string; usage?: DeapUsage };
 
 export class DeapClient {
-  private apiKey: string;
+  private apiKeys: string[];
+  private currentKeyIndex: number = 0;
   private baseUrl: string;
   /** 已被 deap 判定不可用的模型缓存（model → 过期时间戳），避免重复撞 403 */
   private unavailableCache = new Map<string, number>();
+  /** 已被判定无效的密钥索引集合（401鉴权失败，永久失效） */
+  private invalidKeyIndices = new Set<number>();
+  /** 密钥的配额状态：'low' 表示402配额不足（黄灯，暂时不可用） */
+  private keyQuotaStatus = new Map<number, 'low'>();
+  /** 日志队列：存储需要显示的日志行（刷新时还原），最多100条 */
+  private logQueue: string[] = [];
 
   constructor(apiKey?: string, baseUrl?: string) {
-    this.apiKey = apiKey || settings.deapApiKey || '';
+    this.apiKeys = apiKey ? [apiKey] : settings.deapApiKeys;
     this.baseUrl = (baseUrl || settings.deapBaseUrl).replace(/\/$/, '');
-    if (!this.apiKey) {
-      throw new Error('DEAP_API_KEY is not configured. Set it in .env or env.');
+
+    if (this.apiKeys.length === 0) {
+      throw new Error('DEAP_API_KEYS is not configured. Set it in .env or env.');
+    }
+  }
+
+  /** 获取当前可用的密钥（跳过已标记为无效的密钥） */
+  private getCurrentKey(): string | null {
+    // 如果所有密钥都被标记为无效，返回 null（调用者应返回402）
+    if (this.invalidKeyIndices.size >= this.apiKeys.length) {
+      console.error('[deap] 所有密钥均已被标记为无效，无法继续请求');
+      return null;
+    }
+
+    // 寻找下一个有效密钥（跳过401红灯和402黄灯的密钥）
+    for (let i = 0; i < this.apiKeys.length; i++) {
+      const idx = (this.currentKeyIndex + i) % this.apiKeys.length;
+      // 跳过401鉴权失败的密钥（红灯）
+      if (this.invalidKeyIndices.has(idx)) continue;
+      // 跳过402配额不足的密钥（黄灯）
+      if (this.keyQuotaStatus.get(idx) === 'low') continue;
+
+      this.currentKeyIndex = idx;
+      return this.apiKeys[idx];
+    }
+
+    // 理论上不会到这里（前面已检查过全部无效的情况）
+    return null;
+  }
+
+  /** 标记当前密钥为无效（401鉴权失败） */
+  private markCurrentKeyInvalid() {
+    this.invalidKeyIndices.add(this.currentKeyIndex);
+    // 添加到日志队列（带时间戳）
+    const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    this.logQueue.push(`[${timestamp}] [deap] 🔴 密钥 #${this.currentKeyIndex + 1} 鉴权失败`);
+    // 限制日志队列长度，删除最老的日志
+    if (this.logQueue.length > 100) {
+      this.logQueue.shift();
+    }
+    // 原地刷新密钥池表格（包含历史日志）
+    this.printKeyTable(true);
+  }
+
+  /** 标记当前密钥配额不足（402但还能用） */
+  private markCurrentKeyLowQuota() {
+    this.keyQuotaStatus.set(this.currentKeyIndex, 'low');
+    // 添加到日志队列（带时间戳）
+    const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    this.logQueue.push(`[${timestamp}] [deap] 🟡 密钥 #${this.currentKeyIndex + 1} 配额不足`);
+    // 限制日志队列长度，删除最老的日志
+    if (this.logQueue.length > 100) {
+      this.logQueue.shift();
+    }
+    // 原地刷新密钥池表格（包含历史日志）
+    this.printKeyTable(true);
+  }
+
+  /** 获取当前有效的密钥数量（仅计算绿灯密钥） */
+  getValidKeyCount(): number {
+    let count = 0;
+    for (let i = 0; i < this.apiKeys.length; i++) {
+      // 跳过401鉴权失败的密钥（红灯）
+      if (this.invalidKeyIndices.has(i)) continue;
+      // 跳过402配额不足的密钥（黄灯）
+      if (this.keyQuotaStatus.get(i) === 'low') continue;
+      count++;
+    }
+    return count;
+  }
+
+  /** 生成密钥脱敏字符串（sk-xxxxxxxx…xxxx，保留前10后4位） */
+  private maskKey(key: string): string {
+    if (key.length <= 14) return key.slice(0, 7) + '…';
+    return `${key.slice(0, 10)}…${key.slice(-4)}`;
+  }
+
+  /**
+   * 打印密钥池可用性表格（cli-table3）。
+   * @param refresh 是否原地刷新（清除之前的所有内容后重新打印）
+   */
+  printKeyTable(refresh = false): void {
+    const now = new Date().toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).replace(/\//g, '-');
+    const rows: string[][] = [];
+
+    for (let i = 0; i < this.apiKeys.length; i++) {
+      // 优先级：401鉴权失败（红灯） > 402配额不足（黄灯） > 正常（绿灯）
+      let light: string;
+      if (this.invalidKeyIndices.has(i)) {
+        light = '🔴'; // 401鉴权失败，永久失效
+      } else if (this.keyQuotaStatus.get(i) === 'low') {
+        light = '🟡'; // 402配额不足，但还能用
+      } else {
+        light = '🟢'; // 正常
+      }
+      const masked = this.maskKey(this.apiKeys[i]);
+      const keyStr = i === this.currentKeyIndex ? '\x1b[4m' + masked + '\x1b[24m' : masked;
+      const note = settings.keysName[i] || '';
+      rows.push([light, String(i + 1), keyStr, note]);
+    }
+
+    const titleCell = '密钥池 @ ' + now;
+    const head = ['', '序号', '密钥', '备注'];
+
+    const table = new Table({
+      style: { head: ['cyan'] },
+      colWidths: [4, 6, 22, 16],
+    });
+
+    // 标题行独占一行（跨列）
+    table.push([{ colSpan: 4, content: titleCell, hAlign: 'center' }]);
+    // 列头
+    table.push(head);
+    // 数据行
+    table.push(...rows);
+
+    const tableStr = table.toString();
+
+    if (refresh) {
+      // 从头输出：清除整个屏幕并回到顶部
+      process.stdout.write('\x1B[H\x1B[2J');
+    }
+
+    // 输出启动信息
+    console.log(`🚀 wukong-penetrate running at http://0.0.0.0:${settings.port}`);
+
+    // 输出表格
+    console.log(tableStr);
+
+    // 输出历史日志队列（刷新时还原）
+    if (this.logQueue.length > 0) {
+      for (const log of this.logQueue) {
+        console.log(log);
+      }
     }
   }
 
@@ -142,10 +290,53 @@ export class DeapClient {
       });
       if (res.ok) return res;
       const text = await res.text().catch(() => '');
+      // 鉴权失败（401）→ 标记当前密钥无效，切换密钥并重试
+      if (res.status === 401) {
+        this.markCurrentKeyInvalid();
+        const nextKey = this.getCurrentKey();
+        if (nextKey) {
+          const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+          const logMsg = `[${timestamp}] [deap ${label}] 密钥 #${this.currentKeyIndex + 1} 鉴权失败（401），切换到密钥 #${this.currentKeyIndex + 1} 重试`;
+          this.logQueue.push(logMsg);
+          // 限制日志队列长度，删除最老的日志
+          if (this.logQueue.length > 100) {
+            this.logQueue.shift();
+          }
+          attempt = -1; // 重新计数重试
+          continue;
+        } else {
+          // 所有密钥都失效，返回402错误
+          throw new Error('deap ' + label + ' failed: 所有密钥均已失效（鉴权失败），无法继续请求');
+        }
+      }
+      // 配额超限（402）→ 标记为配额不足（黄灯），切换密钥并重试
+      if (res.status === 402) {
+        this.markCurrentKeyLowQuota();
+        const nextKey = this.getCurrentKey();
+        if (nextKey) {
+          const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+          const logMsg = `[${timestamp}] [deap ${label}] 密钥 #${this.currentKeyIndex + 1} 配额不足（402），切换到密钥 #${this.currentKeyIndex + 1} 重试`;
+          this.logQueue.push(logMsg);
+          // 限制日志队列长度，删除最老的日志
+          if (this.logQueue.length > 100) {
+            this.logQueue.shift();
+          }
+          attempt = -1; // 重新计数重试
+          continue;
+        } else {
+          // 所有密钥都失效，返回402错误
+          throw new Error('deap ' + label + ' failed: 所有密钥均已失效（配额不足），无法继续请求');
+        }
+      }
       // 模型不可用（403）→ 动态兜底到 wukongModel（仅一次）
       if (this.isModelUnavailable(res.status, text) && !fallbackTried) {
         this.markUnavailable(useModel);
-        console.warn(`[deap ${label}] 模型 "${useModel}" 不可用（403），动态兜底到 "${settings.wukongModel}"`);
+        const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        const logMsg = `[${timestamp}] [deap ${label}] 模型 "${useModel}" 不可用（403），动态兜底到 "${settings.wukongModel}"`;
+        this.logQueue.push(logMsg);
+        if (this.logQueue.length > 100) {
+          this.logQueue.shift();
+        }
         useModel = settings.wukongModel;
         fallbackTried = true;
         attempt = -1; // 兜底模型重新计重试
@@ -153,19 +344,26 @@ export class DeapClient {
       }
       // 渠道错误（550 等）→ 重试同一模型
       if (this.isRetriableError(res.status, text) && attempt < settings.channelRetryMax) {
-        console.warn(`[deap ${label}] 可重试错误，第 ${attempt + 1}/${settings.channelRetryMax} 次重试：HTTP ${res.status} ${text.slice(0, 200)}`);
+        const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        const logMsg = `[${timestamp}] [deap ${label}] 可重试错误，第 ${attempt + 1}/${settings.channelRetryMax} 次重试：HTTP ${res.status} ${text.slice(0, 200)}`;
+        this.logQueue.push(logMsg);
+        if (this.logQueue.length > 100) {
+          this.logQueue.shift();
+        }
         await this.backoff(attempt);
         continue;
       }
-      throw new Error(`deap ${label} failed: HTTP ${res.status} ${text.slice(0, 300)}`);
+      throw new Error('deap ' + label + ' failed: HTTP ' + res.status + ' ' + text.slice(0, 300));
     }
   }
 
   /** 组装 deap 要求的一整套请求头。缺任何一个 x-dingtalk-* 都会被拒（400）。 */
   private buildHeaders(): Record<string, string> {
+    const key = this.getCurrentKey();
+    if (!key) throw new Error('所有密钥均已失效，无法发起请求');
     return {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${this.apiKey}`,
+      Authorization: `Bearer ${key}`,
       // 注意：流式也【不要】设 Accept: text/event-stream —— deap 会因该头返回 406。
       'x-litellm-session-id': randomUUID(),
       'x-dingtalk-ability-call-session-id': randomUUID(),

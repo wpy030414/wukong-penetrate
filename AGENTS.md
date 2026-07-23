@@ -7,7 +7,7 @@
 
 ## 🔑 先拿到 deap API Key（运维前置）
 
-直连 deap 网关需要一枚 `DEAP_API_KEY`——它是本机已登录的悟空 daemon 调 deap 时挂在请求头里的
+直连 deap 网关需要 `DEAP_API_KEYS`——它是本机已登录的悟空 daemon 调 deap 时挂在请求头里的
 临时密钥（`sk-` + 32 位小写字母数字，约 **29 天**有效）。
 
 **获取方式：`pnpm capture-key`**（[scripts/capture-key.ts](./scripts/capture-key.ts)，用 `tsx` 跑）。
@@ -29,12 +29,12 @@
 
 ```
  Anthropic /v1/messages
-   ─▶  Express (本仓库)  ─▶ HTTPS + DEAP_API_KEY ─▶ api-deap.dingtalk.com (多模型网关)
+   ─▶  Express (本仓库)  ─▶ HTTPS + DEAP_API_KEYS ─▶ api-deap.dingtalk.com (多模型网关)
    index → adapter → deapClient        (OpenAI 协议, tools / tool_calls 双向翻译)
    dingtalk-auto→qwen3.7-plus · claude-opus-4-8→真Claude · gpt-4o→真GPT
 ```
 
-**核心认知**：本服务自身不跑任何模型，全部能力来自远端 deap 网关（鉴权靠 `DEAP_API_KEY`）。
+**核心认知**：本服务自身不跑任何模型，全部能力来自远端 deap 网关（鉴权靠 `DEAP_API_KEYS`）。
 悟空 App 不在运行链路里，只在抓 key 时用到。
 
 ---
@@ -74,7 +74,7 @@ src/
 唯一读取 `process.env` 的地方，导出不可变的 `settings`。关键项：
 
 ```typescript
-deapApiKey:      process.env.DEAP_API_KEY           // sk-...，必填
+deapApiKeys:     process.env.DEAP_API_KEYS.split(',').map((s)=>s.trim()).filter(Boolean)  // sk-.., 必填
 deapBaseUrl:     'https://api-deap.dingtalk.com/dingtalk/v1'
 wukongModel:     'dingtalk-auto'                     // 兜底模型（不可用时回退）
 availableModels: ['dingtalk-auto','claude-opus-4-8','gpt-4o']  // /v1/models 展示候选

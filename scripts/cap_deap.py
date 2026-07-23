@@ -38,4 +38,7 @@ def response(flow: http.HTTPFlow) -> None:
     if "api-deap" in flow.request.pretty_host:
         log("=== RESPONSE ===")
         log(f"status: {flow.response.status_code}")
+        # 响应头里的组织/用户信息（x-dingtalk-corp-id / x-dingtalk-org-name 等）
+        for k, v in flow.response.headers.items():
+            log(f"RH {k}: {v}")
         log(f"BODY: {(flow.response.get_text() or '')[:2000]}")

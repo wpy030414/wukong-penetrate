@@ -402,6 +402,7 @@ function trigger(): void {
   setTimeout(() => { try { p.kill(); } catch {} }, 30000);
 }
 
+/** 从抓包日志提取 Bearer key */
 async function extractKey(): Promise<string | null> {
   step('等待并提取 Bearer key');
   const deadline = Date.now() + WAIT_MS;
@@ -426,6 +427,17 @@ async function extractKey(): Promise<string | null> {
   }
   fail(`等待 ${WAIT_MS / 1000}s 未抓到 key`);
   return null;
+}
+
+/** 交互式询问用户输入密钥备注名 */
+async function askOrgName(): Promise<string> {
+  const rl = (await import('node:readline')).createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question('   🔖 请输入该密钥的备注名（回车默认为"无"）: ', (answer: string) => {
+      rl.close();
+      resolve(answer.trim() || '无');
+    });
+  });
 }
 
 // —— 失败诊断 ——
@@ -490,22 +502,56 @@ async function validateKey(key: string): Promise<boolean> {
   }
 }
 
-// —— 写 .env ——
-function writeEnv(key: string): boolean {
-  step('写入 .env');
+// —— 写 .env（操作 DEAP_API_KEYS 行 + KEYS_NAME 行，追加 / 新增，不碰其他变量）——
+function writeEnv(key: string, orgName: string): boolean {
+  step('写入 DEAP_API_KEYS + KEYS_NAME 到 .env');
   if (sh(`cd "${REPO_ROOT}" && git check-ignore .env`).code !== 0) {
     fail('.env 未被 git 忽略！为防止泄露已中止。请先把 .env 加入 .gitignore');
     return false;
   }
   const lines = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, 'utf8').split('\n') : [];
-  const set = (k: string, v: string): void => {
-    const i = lines.findIndex((l) => l.startsWith(`${k}=`));
-    if (i >= 0) lines[i] = `${k}=${v}`; else lines.push(`${k}=${v}`);
-  };
-  set('BACKEND', 'deap');
-  set('DEAP_API_KEY', key);
-  set('DEAP_BASE_URL', DEAP_BASE_URL);
-  set('WUKONG_MODEL', 'dingtalk-auto');
+
+  // —— DEAP_API_KEYS ——
+  const keysIdx = lines.findIndex((l) => l.startsWith('DEAP_API_KEYS='));
+  let keyCount = 0;
+
+  if (keysIdx >= 0) {
+    const raw = lines[keysIdx].slice('DEAP_API_KEYS='.length).trim();
+    const existing = raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+    if (existing.includes(key)) {
+      ok(`密钥已存在于 DEAP_API_KEYS 池中（${mask(key)}），无需重复添加`);
+      return true;
+    }
+    existing.push(key);
+    lines[keysIdx] = `DEAP_API_KEYS=${existing.join(',')}`;
+    keyCount = existing.length;
+    console.log(`   已追加密钥 ${mask(key)}，池中共 ${existing.length} 个密钥`);
+  } else {
+    lines.push(`DEAP_API_KEYS=${key}`);
+    keyCount = 1;
+    console.log(`   已新增 DEAP_API_KEYS=${mask(key)}`);
+  }
+
+  // —— KEYS_NAME ——
+  const nameIdx = lines.findIndex((l) => l.startsWith('KEYS_NAME='));
+  if (nameIdx >= 0) {
+    // 已有 KEYS_NAME 行：确保与 DEAP_API_KEYS 位置一一对应
+    const raw = lines[nameIdx].slice('KEYS_NAME='.length).trim();
+    const existingNames = raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+    // 补全至与密钥池等长（新 key 的备注追加在末尾）
+    while (existingNames.length < keyCount - 1) existingNames.push('无');
+    existingNames.push(orgName);
+    lines[nameIdx] = `KEYS_NAME=${existingNames.join(',')}`;
+    console.log(`   已同步 KEYS_NAME（第 ${existingNames.length} 位 = "${orgName}"）`);
+  } else {
+    // 无 KEYS_NAME 行：新建。对第 1 个 key 直接设值；后续 key 前面用"无"占位
+    const names: string[] = [];
+    while (names.length < keyCount - 1) names.push('无');
+    names.push(orgName);
+    lines.push(`KEYS_NAME=${names.join(',')}`);
+    console.log(`   已新增 KEYS_NAME="${orgName}"`);
+  }
+
   const content = lines.filter((l, i) => !(l === '' && i === lines.length - 1)).join('\n').replace(/\n{3,}/g, '\n\n');
   fs.writeFileSync(ENV_PATH, content + '\n', { mode: 0o600 });
   fs.chmodSync(ENV_PATH, 0o600);
@@ -555,9 +601,10 @@ function cleanup(success: boolean): void {
     if (!key) { diagnoseFailure(); process.exitCode = 1; return; }
 
     if (!(await validateKey(key))) { process.exitCode = 1; return; }
-    if (!writeEnv(key)) { process.exitCode = 1; return; }
+    const orgName = await askOrgName();
+    if (!writeEnv(key, orgName)) { process.exitCode = 1; return; }
 
-    console.log(`\n🎉 完成！抓到 key ${mask(key)} 并已写入 .env。`);
+    console.log(`\n🎉 完成！抓到 key ${mask(key)}（${orgName}）并已写入 DEAP_API_KEYS + KEYS_NAME。`);
     console.log('   重启代理后生效：lsof -ti :19067 | xargs kill -9; pnpm serve\n');
     success = true;
   } finally {

@@ -2,7 +2,7 @@
 name: capture-deap-key
 description: >-
   通过 mitmproxy 中间人抓包，从本机已登录的钉钉悟空 daemon 截获 deap 网关的临时 API Key
-  （sk- 前缀、约 29 天有效），并写入本项目的 .env。当 .env 里的 DEAP_API_KEY 失效
+  （sk- 前缀、约 29 天有效），并写入本项目的 .env。当 .env 里的 DEAP_API_KEYS 全部失效
   （代理对 deap 返回 401/unauthorized）或首次配置时使用。
 ---
 
@@ -17,12 +17,14 @@ description: >-
 pnpm capture-key
 ```
 
-脚本会自动：自检 → 起 mitmdump → **请你输入一次 sudo 密码** → 开系统代理 →
-触发 daemon 发请求 → 抓到 key → 直连校验 → 写入 `.env` → **还原系统代理** → 清理现场。
+脚本会自动：自检 → 起 mitmdump → 开系统代理 → 触发 daemon 发请求 →
+抓到 key → 直连校验 → **询问备注名** → 追加到 `.env` 的 `DEAP_API_KEYS` 池 →
+**还原系统代理** → 清理现场。
 
-你需要做的只有两件：
+你需要做：
 1. **保持悟空 daemon 已登录运行**（脚本会检测，不会擅自重启悟空）。
-2. 在终端**输入一次 sudo 密码**（用于开/关系统代理，TTY 下不回显、不落盘）。
+2. 输入备注名（回车默认为"无"），方便在密钥池表格里辨认。
+3. 首次可能需要输一次 `sudo` 密码（CA 信任 / 开系统代理）。
 
 > 主用网络接口默认 `Wi-Fi`，若不是可用 `CAPTURE_NET_SERVICE=<接口名> pnpm capture-key` 覆盖
 > （用 `networksetup -listallnetworkservices` 查你的接口名）。
@@ -106,7 +108,7 @@ curl -s -m 30 https://api-deap.dingtalk.com/dingtalk/v1/chat/completions \
   -H "x-dingtalk-product-code: AI_WUKONG" -H "x-dingtalk-ability-code: M_AI_WUKONG" \
   -d '{"model":"dingtalk-auto","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}'
 
-# 6. 写入 .env（DEAP_API_KEY），chmod 600，确认 git check-ignore .env
+# 6. 写入 .env 的 DEAP_API_KEYS（逗号分隔多密钥），并同步 KEYS_NAME，chmod 600
 
 # 7. 还原（必做）：关系统代理 + 停 mitm + 焚日志
 sudo networksetup -setwebproxystate "Wi-Fi" off
