@@ -18,16 +18,27 @@ import {
   TextBlock,
   ToolUseBlock,
   ThinkingBlock,
+  ServerToolUseBlock,
+  WebSearchToolResultBlock,
+  WebSearchResultItem,
   Usage,
 } from './types';
 import { settings } from './config';
 import { DeapClient, DeapChatMessage, DeapTool, DeapToolCall } from './deapClient';
+import { getSearchProvider, SearchHit } from './search';
 
 export class AnthropicAdapter {
-  /** 把 Anthropic tools 定义翻译成 OpenAI function 定义。 */
+  /**
+   * 把 Anthropic tools 定义翻译成 OpenAI function 定义。
+   * 注意：Anthropic 的 server tool（type 以 web_search 开头）会被剥离——
+   * chat/completions 不通过 tools 启用联网搜索，留着会被转成名为 web_search 的假 function 误导模型。
+   * 联网改由 extra_body.enable_search 注入（见 deapClient.buildBody，受 settings.enableSearch 控制）。
+   */
   static buildDeapTools(request: AnthropicRequest): DeapTool[] | undefined {
     if (!request.tools || request.tools.length === 0) return undefined;
-    return request.tools.map((t) => ({
+    const customTools = request.tools.filter((t) => !t.type || !/^web_search/i.test(t.type));
+    if (customTools.length === 0) return undefined;
+    return customTools.map((t) => ({
       type: 'function',
       function: {
         name: t.name,
@@ -270,60 +281,161 @@ export class AnthropicAdapter {
     return `${prefix}${uuidv4().replace(/-/g, '').slice(0, 24)}`;
   }
 
-  /** 非流式：把 deap 结果翻译成标准 Anthropic 响应 JSON。 */
+  // ===== 乙路：网关自封 WebSearch（拦截 web_search → 自行搜索 → 伪造 server tool 块）=====
+
+  /** 请求是否带 Anthropic web_search server tool（客户端期望联网）。 */
+  private static requestWantsWebSearch(request: AnthropicRequest): boolean {
+    return !!request.tools?.some(
+      (t) => typeof t.type === 'string' && /^web_search/i.test(t.type)
+    );
+  }
+
+  /** 暴露给 deap 模型的内部 web_search function（让模型用 tool_call 表达搜索意图）。 */
+  private static makeSearchToolDef(): DeapTool {
+    return {
+      type: 'function',
+      function: {
+        name: 'web_search',
+        description: 'Search the web for real-time / fresh information. Returns ranked web pages with titles, urls and snippets.',
+        parameters: {
+          type: 'object',
+          properties: { query: { type: 'string', description: 'The search query' } },
+          required: ['query'],
+        },
+      },
+    };
+  }
+
+  /** 把搜索结果格式化成喂回 deap 的 role:tool 文本（Qwen 可读）。 */
+  private static hitsToToolResultText(hits: SearchHit[]): string {
+    if (hits.length === 0) return '(搜索无结果或搜索失败，请基于已有知识回答，或换个关键词重试)';
+    return hits
+      .map((h, i) => `[${i + 1}] ${h.title}\n    ${h.url}\n    ${h.snippet}`)
+      .join('\n');
+  }
+
+  /** 构造 Anthropic 的 server_tool_use + web_search_tool_result 两块（非流式）。 */
+  private static buildSearchBlocks(
+    query: string,
+    hits: SearchHit[]
+  ): [ServerToolUseBlock, WebSearchToolResultBlock] {
+    const id = AnthropicAdapter.shortId('srvtoolu_');
+    return [
+      { type: 'server_tool_use', id, name: 'web_search', input: { query } },
+      {
+        type: 'web_search_tool_result',
+        tool_use_id: id,
+        content: hits.map<WebSearchResultItem>((h) => ({
+          type: 'web_search_result',
+          url: h.url,
+          title: h.title,
+          encrypted_content: h.snippet,
+        })),
+      },
+    ];
+  }
+
+  /** 解析 web_search tool_call 的 arguments，提取 query 字符串。 */
+  private static parseWebSearchQuery(args: string): string {
+    try {
+      const q = JSON.parse(args || '{}')?.query;
+      if (typeof q === 'string' && q.trim()) return q.trim();
+    } catch { /* fallthrough */ }
+    return (args || '').trim();
+  }
+
+  /**
+   * 非流式：把 deap 结果翻译成标准 Anthropic 响应 JSON。
+   * 乙路：若请求带 web_search 且 searchEngine 开启，进入多轮搜索循环——拦截模型的
+   * web_search tool_call → 调 SearchProvider → 伪造 server_tool_use + web_search_tool_result
+   * 块累积进 content，并把结果喂回 deap 续写，直到模型不再搜索或达到轮数上限。
+   */
   static async chat(request: AnthropicRequest, deapClient: DeapClient): Promise<AnthropicResponse> {
     const { messages, cache } = AnthropicAdapter.buildDeapMessages(request);
-    const tools = AnthropicAdapter.buildDeapTools(request);
+    const provider = getSearchProvider();
+    const wantSearch = !!provider && AnthropicAdapter.requestWantsWebSearch(request);
+    let tools = AnthropicAdapter.buildDeapTools(request);
+    if (wantSearch) tools = [...(tools ?? []), AnthropicAdapter.makeSearchToolDef()];
     const toolChoice = AnthropicAdapter.buildToolChoice(request);
     const model = AnthropicAdapter.resolveModel(request);
-
     const enableThinking = AnthropicAdapter.resolveThinking(request);
 
     // 构建 extra_body 传递缓存元数据
     const extraBody = AnthropicAdapter.buildExtraBody(cache, request.tools);
 
-    const result = await deapClient.chat(
-      messages,
-      model,
-      request.max_tokens,
-      tools,
-      toolChoice,
-      extraBody,
-      enableThinking
-    );
+    const content: (ThinkingBlock | TextBlock | ToolUseBlock | ServerToolUseBlock | WebSearchToolResultBlock)[] = [];
+    const usage: Usage = { input_tokens: 0, output_tokens: 0 };
+    let stopReason = 'end_turn';
 
-    // content 块顺序：thinking（若有）→ text → tool_use
-    const content: (ThinkingBlock | TextBlock | ToolUseBlock)[] = [];
-    if (result.reasoning) {
-      content.push({
-        type: 'thinking',
-        thinking: result.reasoning,
-        signature: AnthropicAdapter.shortId('sig_'),
-      });
-    }
-    if (result.text) content.push({ type: 'text', text: result.text });
-    for (const tc of result.toolCalls) {
-      let input: Record<string, any> = {};
-      try {
-        input = JSON.parse(tc.function.arguments || '{}');
-      } catch { /* 保留空对象 */ }
-      content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
-    }
+    for (let round = 0; round <= settings.searchMaxRounds; round++) {
+      const result = await deapClient.chat(
+        messages,
+        model,
+        request.max_tokens,
+        tools,
+        toolChoice,
+        extraBody,
+        enableThinking
+      );
 
-    const inputTokens = result.usage?.prompt_tokens ?? request.messages.length * 100;
-    const outputTokens = result.usage?.completion_tokens ?? Math.floor(result.text.length / 4);
+      // thinking → text → 客户端 tool_use（累积，跨轮）
+      if (result.reasoning) {
+        content.push({
+          type: 'thinking',
+          thinking: result.reasoning,
+          signature: AnthropicAdapter.shortId('sig_'),
+        });
+      }
+      if (result.text) content.push({ type: 'text', text: result.text });
 
-    // 构建 usage，包含缓存相关字段
-    const usage: Usage = {
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      total_tokens: inputTokens + outputTokens,
-    };
+      const wsCall = result.toolCalls.find((tc) => tc.function.name === 'web_search');
+      const clientCalls = result.toolCalls.filter((tc) => tc.function.name !== 'web_search');
+      for (const tc of clientCalls) {
+        let input: Record<string, any> = {};
+        try {
+          input = JSON.parse(tc.function.arguments || '{}');
+        } catch { /* 保留空对象 */ }
+        content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
+      }
 
-    // 如果 deap 返回了 prompt_tokens_details.cached_tokens，转换为 Anthropic 格式
-    const cachedTokens = result.usage?.prompt_tokens_details?.cached_tokens;
-    if (cachedTokens !== undefined && cachedTokens > 0) {
-      usage.cache_read_input_tokens = cachedTokens;
+      // usage（input 取末轮；output 跨轮累加）
+      const inT = result.usage?.prompt_tokens ?? request.messages.length * 100;
+      const outT = result.usage?.completion_tokens ?? Math.floor((result.text?.length ?? 0) / 4);
+      usage.input_tokens = inT;
+      usage.output_tokens += outT;
+      usage.total_tokens = inT + usage.output_tokens;
+      const cachedTokens = result.usage?.prompt_tokens_details?.cached_tokens;
+      if (cachedTokens !== undefined && cachedTokens > 0) {
+        usage.cache_read_input_tokens = cachedTokens;
+      }
+
+      // 客户端工具调用优先：立即交还控制权
+      if (clientCalls.length > 0) {
+        stopReason = 'tool_use';
+        break;
+      }
+      // 模型想搜索且未达上限：执行搜索续轮
+      if (wantSearch && wsCall && round < settings.searchMaxRounds) {
+        const query = AnthropicAdapter.parseWebSearchQuery(wsCall.function.arguments);
+        let hits: SearchHit[] = [];
+        try {
+          hits = await provider!.search(query);
+        } catch {
+          hits = [];
+        }
+        content.push(...AnthropicAdapter.buildSearchBlocks(query, hits));
+        // 喂回 deap：assistant 的 web_search tool_call + role:tool 结果（仅 wsCall，保持 OpenAI 消息链一致）
+        messages.push({ role: 'assistant', content: null, tool_calls: [wsCall] });
+        messages.push({
+          role: 'tool',
+          tool_call_id: wsCall.id,
+          content: AnthropicAdapter.hitsToToolResultText(hits),
+        });
+        continue;
+      }
+      // 无搜索意图，或搜索达上限（wsCall 为内部代办，不计客户端 tool_use）→ end_turn
+      stopReason = 'end_turn';
+      break;
     }
 
     return {
@@ -332,7 +444,7 @@ export class AnthropicAdapter {
       role: 'assistant',
       content,
       model: request.model,
-      stop_reason: result.finishReason === 'tool_calls' ? 'tool_use' : 'end_turn',
+      stop_reason: stopReason,
       usage,
     };
   }
@@ -340,17 +452,23 @@ export class AnthropicAdapter {
   /**
    * 流式：把 deap 的 SSE 增量翻译成 Anthropic 标准事件序列。
    *
-   *   message_start
-   *   → content_block_start(text) → content_block_delta(text_delta)×N → content_block_stop
-   *   → content_block_start(tool_use) → content_block_delta(input_json_delta)×N → content_block_stop
-   *   → message_delta(stop_reason, usage) → message_stop
+   * 乙路真流式（跨轮）：message_start 整个响应只发一次；blockIndex/openBlock 跨搜索轮续自增。
+   * 每轮 chatStream 透传 thinking/text/客户端 tool_use；模型的 web_search tool_call「攒而不发」，
+   * 本轮结束后执行搜索，注入 server_tool_use + web_search_tool_result 两对 content_block_start/stop，
+   * 再把结果喂回 deap 发起下一轮续写，直到模型不再搜索或达到轮数上限。
    *
-   * 文本块与工具块按出现顺序各占一个 index；工具的 arguments 增量以 input_json_delta 流式下发。
+   *   message_start
+   *   → [每轮] content_block_start(text/thinking/tool_use) → delta×N → stop
+   *   → [搜索轮] content_block_start(server_tool_use)→stop + content_block_start(web_search_tool_result)→stop
+   *   → message_delta(stop_reason, usage) → message_stop
    */
   static async *streamResponse(request: AnthropicRequest, deapClient: DeapClient): AsyncGenerator<string> {
     const messageId = AnthropicAdapter.shortId('msg_');
     const { messages, cache } = AnthropicAdapter.buildDeapMessages(request);
-    const tools = AnthropicAdapter.buildDeapTools(request);
+    const provider = getSearchProvider();
+    const wantSearch = !!provider && AnthropicAdapter.requestWantsWebSearch(request);
+    let tools = AnthropicAdapter.buildDeapTools(request);
+    if (wantSearch) tools = [...(tools ?? []), AnthropicAdapter.makeSearchToolDef()];
     const toolChoice = AnthropicAdapter.buildToolChoice(request);
     const model = AnthropicAdapter.resolveModel(request);
     const enableThinking = AnthropicAdapter.resolveThinking(request);
@@ -363,6 +481,7 @@ export class AnthropicAdapter {
     const ev = (type: string, data: any) =>
       `id: ${messageId}-${eventId++}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
 
+    // message_start：整个响应只发一次（跨多轮搜索仍是同一个 message）
     yield `id: ${messageId}\nevent: message_start\ndata: ${JSON.stringify({
       type: 'message_start',
       message: {
@@ -375,7 +494,7 @@ export class AnthropicAdapter {
       },
     })}\n\n`;
 
-    // 块状态机：当前打开的 content block 的 index 与类型
+    // 跨轮状态：blockIndex 在多轮间连续递增，openBlock/closeBlock 复用
     let blockIndex = -1;
     let openBlock: 'text' | 'tool_use' | 'thinking' | null = null;
     let accumulatedText = '';
@@ -390,71 +509,149 @@ export class AnthropicAdapter {
       }
     };
 
-    for await (const e of deapClient.chatStream(messages, model, request.max_tokens, tools, toolChoice, extraBody, enableThinking)) {
-      if (e.kind === 'thinking') {
-        // 思考块：开启 thinking content block，下发 thinking_delta
-        if (openBlock !== 'thinking') {
-          yield* closeBlock();
-          blockIndex++;
-          yield ev('content_block_start', {
-            type: 'content_block_start',
+    for (let round = 0; round <= settings.searchMaxRounds; round++) {
+      let wsId: string | null = null;
+      let wsArgs = '';
+      let hadClientToolCall = false;
+
+      for await (const e of deapClient.chatStream(messages, model, request.max_tokens, tools, toolChoice, extraBody, enableThinking)) {
+        if (e.kind === 'thinking') {
+          // 思考块：开启 thinking content block，下发 thinking_delta
+          if (openBlock !== 'thinking') {
+            yield* closeBlock();
+            blockIndex++;
+            yield ev('content_block_start', {
+              type: 'content_block_start',
+              index: blockIndex,
+              content_block: { type: 'thinking', thinking: '' },
+            });
+            openBlock = 'thinking';
+          }
+          yield ev('content_block_delta', {
+            type: 'content_block_delta',
             index: blockIndex,
-            content_block: { type: 'thinking', thinking: '' },
+            delta: { type: 'thinking_delta', thinking: e.thinking },
           });
-          openBlock = 'thinking';
-        }
-        yield ev('content_block_delta', {
-          type: 'content_block_delta',
-          index: blockIndex,
-          delta: { type: 'thinking_delta', thinking: e.thinking },
-        });
-      } else if (e.kind === 'text') {
-        if (openBlock !== 'text') {
-          yield* closeBlock();
-          blockIndex++;
-          yield ev('content_block_start', {
-            type: 'content_block_start',
+        } else if (e.kind === 'text') {
+          if (openBlock !== 'text') {
+            yield* closeBlock();
+            blockIndex++;
+            yield ev('content_block_start', {
+              type: 'content_block_start',
+              index: blockIndex,
+              content_block: { type: 'text', text: '' },
+            });
+            openBlock = 'text';
+          }
+          accumulatedText += e.text;
+          yield ev('content_block_delta', {
+            type: 'content_block_delta',
             index: blockIndex,
-            content_block: { type: 'text', text: '' },
+            delta: { type: 'text_delta', text: e.text },
           });
-          openBlock = 'text';
+        } else if (e.kind === 'tool_call_start') {
+          if (e.name === 'web_search') {
+            // 内部代办：关掉前面的块，攒 id（绝不透传成客户端的 tool_use）
+            yield* closeBlock();
+            wsId = e.id;
+            wsArgs = '';
+          } else {
+            // 客户端工具：透传 tool_use 块
+            yield* closeBlock();
+            blockIndex++;
+            yield ev('content_block_start', {
+              type: 'content_block_start',
+              index: blockIndex,
+              content_block: { type: 'tool_use', id: e.id, name: e.name, input: {} },
+            });
+            openBlock = 'tool_use';
+            hadClientToolCall = true;
+          }
+        } else if (e.kind === 'tool_call_args') {
+          if (openBlock === 'tool_use') {
+            yield ev('content_block_delta', {
+              type: 'content_block_delta',
+              index: blockIndex,
+              delta: { type: 'input_json_delta', partial_json: e.args },
+            });
+          } else if (wsId !== null) {
+            wsArgs += e.args; // 累积 web_search 的 query 参数（攒而不发）
+          }
+        } else if (e.kind === 'done') {
+          finalStop = e.finishReason === 'tool_calls' ? 'tool_use' : 'end_turn';
+          outputTokens += e.usage?.completion_tokens ?? 0;
+          if (e.usage?.prompt_tokens_details?.cached_tokens) {
+            cachedTokens = e.usage.prompt_tokens_details.cached_tokens;
+          }
         }
-        accumulatedText += e.text;
-        yield ev('content_block_delta', {
-          type: 'content_block_delta',
-          index: blockIndex,
-          delta: { type: 'text_delta', text: e.text },
-        });
-      } else if (e.kind === 'tool_call_start') {
-        // 新工具块：关掉上一个，开启 tool_use 块
-        yield* closeBlock();
+      }
+
+      yield* closeBlock(); // 关掉本轮最后一个块
+
+      // 客户端工具调用优先：立即交还控制权
+      if (hadClientToolCall) {
+        finalStop = 'tool_use';
+        break;
+      }
+      // 模型想搜索且未达上限：执行搜索 + 注入搜索块 + 喂回 deap 续轮
+      if (wantSearch && wsId && round < settings.searchMaxRounds) {
+        const query = AnthropicAdapter.parseWebSearchQuery(wsArgs);
+        let hits: SearchHit[] = [];
+        try {
+          hits = await provider!.search(query);
+        } catch {
+          hits = [];
+        }
+        const suId = AnthropicAdapter.shortId('srvtoolu_');
+
+        // 注入 server_tool_use 块（跨轮 blockIndex 续）
         blockIndex++;
         yield ev('content_block_start', {
           type: 'content_block_start',
           index: blockIndex,
-          content_block: { type: 'tool_use', id: e.id, name: e.name, input: {} },
+          content_block: { type: 'server_tool_use', id: suId, name: 'web_search', input: { query } },
         });
-        openBlock = 'tool_use';
-      } else if (e.kind === 'tool_call_args') {
-        if (openBlock === 'tool_use') {
-          yield ev('content_block_delta', {
-            type: 'content_block_delta',
-            index: blockIndex,
-            delta: { type: 'input_json_delta', partial_json: e.args },
-          });
-        }
-      } else if (e.kind === 'done') {
-        finalStop = e.finishReason === 'tool_calls' ? 'tool_use' : 'end_turn';
-        outputTokens = e.usage?.completion_tokens ?? Math.floor(accumulatedText.length / 4);
-        // 提取缓存信息
-        cachedTokens = e.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+        yield ev('content_block_stop', { type: 'content_block_stop', index: blockIndex });
+
+        // 注入 web_search_tool_result 块
+        blockIndex++;
+        yield ev('content_block_start', {
+          type: 'content_block_start',
+          index: blockIndex,
+          content_block: {
+            type: 'web_search_tool_result',
+            tool_use_id: suId,
+            content: hits.map((h) => ({
+              type: 'web_search_result',
+              url: h.url,
+              title: h.title,
+              encrypted_content: h.snippet,
+            })),
+          },
+        });
+        yield ev('content_block_stop', { type: 'content_block_stop', index: blockIndex });
+
+        // 喂回 deap：assistant web_search tool_call + role:tool 结果
+        messages.push({
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: wsId, type: 'function' as const, function: { name: 'web_search', arguments: wsArgs || '{}' } }],
+        });
+        messages.push({
+          role: 'tool',
+          tool_call_id: wsId,
+          content: AnthropicAdapter.hitsToToolResultText(hits),
+        });
+        continue; // 发起下一轮 chatStream 续写
       }
+
+      // 无搜索意图：正常结束
+      finalStop = 'end_turn';
+      break;
     }
 
-    yield* closeBlock();
-
-    // 构建 message_delta 的 usage
-    const deltaUsage: any = { output_tokens: outputTokens };
+    const finalOutput = outputTokens > 0 ? outputTokens : Math.floor(accumulatedText.length / 4);
+    const deltaUsage: any = { output_tokens: finalOutput };
     if (cachedTokens > 0) {
       deltaUsage.cache_read_input_tokens = cachedTokens;
     }

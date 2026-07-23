@@ -37,6 +37,29 @@ export interface Settings {
    */
   enableExtendedThinking: boolean;
 
+  // —— 联网搜索（甲路实测）——
+  /**
+   * 是否在 deap 请求里注入 enable_search（DashScope/Qwen 联网搜索）。
+   * 设环境变量 ENABLE_SEARCH=true 开启；开启后所有请求都会带 enable_search，
+   * 用于验证 deap 是否透传给底层 Qwen。
+   * 注意：OpenAI 兼容协议不返回搜索来源 URL，仅让模型回答体现实时信息。
+   */
+  enableSearch: boolean;
+
+  // —— 联网搜索（乙路：网关自封搜索）——
+  /** 搜索引擎：'off' 关闭；'bing-web' 走 cn.bing.com 网页版（无 key 免费） */
+  searchEngine: 'off' | 'bing-web';
+  /** 每次搜索返回的结果条数 */
+  searchMaxResults: number;
+  /** 单次请求最大搜索轮数（防死循环） */
+  searchMaxRounds: number;
+  /** 单次搜索超时（毫秒） */
+  searchTimeoutMs: number;
+  /** Bing 网页版主机（默认 cn.bing.com；国际版 www.bing.com 易触发验证码） */
+  bingWebHost: string;
+  /** Bing 搜索语言区域 */
+  bingWebLocale: string;
+
   // —— 渠道错误重试配置 ——
   /**
    * deap 对第三方模型（claude/gpt）用动态渠道池，间歇性返回 550 "No available channel"。
@@ -85,6 +108,17 @@ export const settings: Settings = {
 
   // Extended Thinking 默认开启（deap 已实测支持 reasoning_content）
   enableExtendedThinking: true,
+
+  // 联网搜索实测开关（甲路）：设 ENABLE_SEARCH=true 后请求注入 DashScope enable_search
+  enableSearch: true,
+
+  // 联网搜索（乙路）：默认 cn.bing.com 网页版（无 key 免费）
+  searchEngine: (process.env.SEARCH_ENGINE as 'off' | 'bing-web') || 'bing-web',
+  searchMaxResults: 5,
+  searchMaxRounds: 3,
+  searchTimeoutMs: 8000,
+  bingWebHost: process.env.BING_WEB_HOST || 'cn.bing.com',
+  bingWebLocale: 'zh-CN',
 
   // 渠道错误重试配置（应对第三方模型 550 No available channel）
   channelRetryMax: 3,

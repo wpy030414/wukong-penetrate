@@ -90,11 +90,13 @@ export class DeapClient {
     }
   }
 
-  /** 获取当前可用的密钥（跳过已标记为无效的密钥） */
+  /**
+   * 获取当前可用的密钥（跳过红灯/黄灯），并把 currentKeyIndex 推进到该密钥。
+   * 全部失效时返回 null（状态由密钥池表格的红/黄灯表达，不再打印文字日志）。
+   */
   private getCurrentKey(): string | null {
-    // 如果所有密钥都被标记为无效，返回 null（调用者应返回402）
+    // 所有密钥均被标记为无效 → 返回 null（调用方抛错 / 返回 402）
     if (this.invalidKeyIndices.size >= this.apiKeys.length) {
-      console.error('[deap] 所有密钥均已被标记为无效，无法继续请求');
       return null;
     }
 
@@ -114,31 +116,21 @@ export class DeapClient {
     return null;
   }
 
-  /** 标记当前密钥为无效（401鉴权失败） */
+  /**
+   * 标记当前密钥为无效（401鉴权失败 → 红灯永久失效）。
+   * 标记后立即把 currentKeyIndex 推进到下一个有效密钥，再刷新表格——这样失效密钥只显示
+   * 红/黄灯、不再带下划线（下划线只属于「当前使用且绿灯」的密钥）。密钥状态由表格表达，不产文字日志。
+   */
   private markCurrentKeyInvalid() {
     this.invalidKeyIndices.add(this.currentKeyIndex);
-    // 添加到日志队列（带时间戳）
-    const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    this.logQueue.push(`[${timestamp}] [deap] 🔴 密钥 #${this.currentKeyIndex + 1} 鉴权失败`);
-    // 限制日志队列长度，删除最老的日志
-    if (this.logQueue.length > 100) {
-      this.logQueue.shift();
-    }
-    // 原地刷新密钥池表格（包含历史日志）
+    this.getCurrentKey(); // 副作用：推进 currentKeyIndex 到下一个有效密钥（全失效时保持不变）
     this.printKeyTable(true);
   }
 
-  /** 标记当前密钥配额不足（402但还能用） */
+  /** 标记当前密钥配额不足（402 → 黄灯，暂不可用）；同样推进 + 刷新表格，不产文字日志。 */
   private markCurrentKeyLowQuota() {
     this.keyQuotaStatus.set(this.currentKeyIndex, 'low');
-    // 添加到日志队列（带时间戳）
-    const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    this.logQueue.push(`[${timestamp}] [deap] 🟡 密钥 #${this.currentKeyIndex + 1} 配额不足`);
-    // 限制日志队列长度，删除最老的日志
-    if (this.logQueue.length > 100) {
-      this.logQueue.shift();
-    }
-    // 原地刷新密钥池表格（包含历史日志）
+    this.getCurrentKey();
     this.printKeyTable(true);
   }
 
@@ -188,7 +180,9 @@ export class DeapClient {
         light = '🟢'; // 正常
       }
       const masked = this.maskKey(this.apiKeys[i]);
-      const keyStr = i === this.currentKeyIndex ? '\x1b[4m' + masked + '\x1b[24m' : masked;
+      // 下划线只标「当前使用且有效（绿灯）」的密钥；红/黄灯密钥即便等于 currentKeyIndex 也不划线
+      const isCurrentActive = i === this.currentKeyIndex && light === '🟢';
+      const keyStr = isCurrentActive ? '\x1b[4m' + masked + '\x1b[24m' : masked;
       const note = settings.keysName[i] || '';
       rows.push([light, String(i + 1), keyStr, note]);
     }
@@ -290,43 +284,23 @@ export class DeapClient {
       });
       if (res.ok) return res;
       const text = await res.text().catch(() => '');
-      // 鉴权失败（401）→ 标记当前密钥无效，切换密钥并重试
+      // 鉴权失败（401）→ 标记当前密钥红灯、推进到下一个有效密钥并重试（状态由表格表达，不产文字日志）
       if (res.status === 401) {
         this.markCurrentKeyInvalid();
-        const nextKey = this.getCurrentKey();
-        if (nextKey) {
-          const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-          const logMsg = `[${timestamp}] [deap ${label}] 密钥 #${this.currentKeyIndex + 1} 鉴权失败（401），切换到密钥 #${this.currentKeyIndex + 1} 重试`;
-          this.logQueue.push(logMsg);
-          // 限制日志队列长度，删除最老的日志
-          if (this.logQueue.length > 100) {
-            this.logQueue.shift();
-          }
+        if (this.getCurrentKey()) {
           attempt = -1; // 重新计数重试
           continue;
-        } else {
-          // 所有密钥都失效，返回402错误
-          throw new Error('deap ' + label + ' failed: 所有密钥均已失效（鉴权失败），无法继续请求');
         }
+        throw new Error('deap ' + label + ' failed: 所有密钥均已失效（鉴权失败），无法继续请求');
       }
-      // 配额超限（402）→ 标记为配额不足（黄灯），切换密钥并重试
+      // 配额超限（402）→ 标记当前密钥黄灯、推进到下一个有效密钥并重试
       if (res.status === 402) {
         this.markCurrentKeyLowQuota();
-        const nextKey = this.getCurrentKey();
-        if (nextKey) {
-          const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-          const logMsg = `[${timestamp}] [deap ${label}] 密钥 #${this.currentKeyIndex + 1} 配额不足（402），切换到密钥 #${this.currentKeyIndex + 1} 重试`;
-          this.logQueue.push(logMsg);
-          // 限制日志队列长度，删除最老的日志
-          if (this.logQueue.length > 100) {
-            this.logQueue.shift();
-          }
-          attempt = -1; // 重新计数重试
+        if (this.getCurrentKey()) {
+          attempt = -1;
           continue;
-        } else {
-          // 所有密钥都失效，返回402错误
-          throw new Error('deap ' + label + ' failed: 所有密钥均已失效（配额不足），无法继续请求');
         }
+        throw new Error('deap ' + label + ' failed: 所有密钥均已失效（配额不足），无法继续请求');
       }
       // 模型不可用（403）→ 动态兜底到 wukongModel（仅一次）
       if (this.isModelUnavailable(res.status, text) && !fallbackTried) {
@@ -398,16 +372,21 @@ export class DeapClient {
     const userQuery =
       messages.filter((m) => m.role === 'user').map((m) => m.content).filter(Boolean).pop() || '';
 
+    const enableSearch = settings.enableSearch;
     return {
       model: model || settings.wukongModel,
       stream,
       max_tokens: maxTokens ?? 4096,
       temperature: 0.6,
       enable_thinking: enableThinking ?? false,
+      // 联网搜索（甲路实测）：DashScope/Qwen 的 enable_search，顶层 + extra_body 双注入，
+      // 最大化被 LiteLLM 透传给底层 Qwen 的概率。受 settings.enableSearch(ENABLE_SEARCH) 控制。
+      ...(enableSearch ? { enable_search: true } : {}),
       ...(stream ? { stream_options: { include_usage: true } } : {}),
       extra_body: {
         enable_thinking: enableThinking ?? false,
         user_query: typeof userQuery === 'string' ? userQuery : '',
+        ...(enableSearch ? { enable_search: true } : {}),
         // 合并传入的 extra_body（包含 cache_control）
         ...extraBody,
       },

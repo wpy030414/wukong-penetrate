@@ -15,6 +15,12 @@ export interface Message {
 
 /** Anthropic 工具定义 */
 export interface AnthropicTool {
+  /**
+   * server tool 类型标识（如 'web_search_20250305'）。普通自定义 tool 无此字段；
+   * 带此标识的不会被转成 function 透传——chat/completions 不靠 tools 启用搜索，
+   * 联网改由 extra_body.enable_search 注入（见 deapClient.buildBody）。
+   */
+  type?: string;
   name: string;
   description?: string;
   input_schema: Record<string, any>;
@@ -71,11 +77,34 @@ export interface Usage {
   cache_read_input_tokens?: number;      // 读取缓存的 token（命中时）
 }
 
+/** Anthropic server-side tool 调用块（乙路网关伪造，对应客户端发起的 web_search） */
+export interface ServerToolUseBlock {
+  type: 'server_tool_use';
+  id: string;
+  name: string;
+  input: Record<string, any>;
+}
+
+/** 单条网页搜索结果（encrypted_content 用搜索引擎 snippet 填充） */
+export interface WebSearchResultItem {
+  type: 'web_search_result';
+  url: string;
+  title: string;
+  encrypted_content?: string;
+}
+
+/** server tool 搜索结果块，tool_use_id 关联对应的 ServerToolUseBlock */
+export interface WebSearchToolResultBlock {
+  type: 'web_search_tool_result';
+  tool_use_id: string;
+  content: WebSearchResultItem[];
+}
+
 export interface AnthropicResponse {
   id: string;
   type: 'message';
   role: 'assistant';
-  content: (ThinkingBlock | TextBlock | ToolUseBlock)[];
+  content: (ThinkingBlock | TextBlock | ToolUseBlock | ServerToolUseBlock | WebSearchToolResultBlock)[];
   model: string;
   stop_reason?: string;
   usage: Usage;
