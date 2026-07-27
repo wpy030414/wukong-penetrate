@@ -24,10 +24,12 @@ pnpm capture-key
 你需要做：
 1. **保持悟空 daemon 已登录运行**（脚本会检测，不会擅自重启悟空）。
 2. 输入备注名（回车默认为"无"），方便在密钥池表格里辨认。
-3. 首次可能需要输一次 `sudo` 密码（CA 信任 / 开系统代理）。
+3. **macOS**：首次可能需要输一次 `sudo` 密码（CA 信任 / 开系统代理）。
+   **Windows**：**必须以管理员身份运行**（PowerShell/cmd 右键「以管理员身份运行」），因为需要修改系统代理注册表和 CA 证书。
 
-> 主用网络接口默认 `Wi-Fi`，若不是可用 `CAPTURE_NET_SERVICE=<接口名> pnpm capture-key` 覆盖
+> **macOS**：主用网络接口默认 `Wi-Fi`，若不是可用 `CAPTURE_NET_SERVICE=<接口名> pnpm capture-key` 覆盖
 > （用 `networksetup -listallnetworkservices` 查你的接口名）。
+> **Windows**：无需指定网络接口（脚本通过注册表设置全局系统代理）。
 
 ---
 
@@ -66,21 +68,31 @@ TLS 能被中间人是因为 daemon 用 `rustls_platform_verifier`（信任系�
 
 | 项 | 检查 | 处理 |
 |---|---|---|
-| mitmproxy 已装 | `mitmdump --version` | `brew install mitmproxy` |
+| mitmproxy 已装 | `mitmdump --version` | macOS: `brew install mitmproxy`；Windows: `pip install mitmproxy` 或 scoop `scoop install mitmproxy` |
 | CA 已生成 | `ls ~/.mitmproxy/mitmproxy-ca-cert.pem` | 裸跑一次 `mitmdump` 再退出 |
-| CA 被系统信任（**唯一 sudo，一劳永逸**） | `security verify-cert -c ~/.mitmproxy/mitmproxy-ca-cert.pem` | 见下 |
+| CA 被系统信任（一劳永逸） | macOS: `security verify-cert -c ~/.mitmproxy/mitmproxy-ca-cert.pem`<br>Windows: `certutil -verify -urlfetch "%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.pem"` | 见下 |
 | **.real daemon 就绪（关键）** | `wukong-cli service status` 应 running（exit 0），`~/.real/daemon.sock` 存在 | 正常打开 Wukong App（完整界面+登录），或 `wukong-cli service start` |
-| 悟空 App 已登录运行 | `pgrep -f DingTalkReal` | 打开悟空扫码登录（注意：App 在跑 ≠ daemon 就绪） |
+| 悟空 App 已登录运行 | macOS: `pgrep -f DingTalkReal`<br>Windows: `tasklist /FI "IMAGENAME eq DingTalkReal.exe"` | 打开悟空扫码登录（注意：App 在跑 ≠ daemon 就绪） |
+| 管理员权限（Windows） | `net session` 应成功 | 右键终端 → 「以管理员身份运行」 |
 
-**信任 CA（首次唯一要做的 sudo 操作）：**
+**信任 CA（首次唯一要做的 sudo/管理员操作）：**
+
+**macOS：**
 ```bash
 sudo security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain ~/.mitmproxy/mitmproxy-ca-cert.pem
 ```
 
+**Windows（以管理员身份运行 PowerShell/cmd）：**
+```cmd
+certutil -addstore -f "Root" "%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.pem"
+```
+
 ## 手动流程（脚本失效时的兜底）
 
 <details><summary>点开展开手动步骤</summary>
+
+### macOS
 
 ```bash
 # 1. 起 mitmdump
@@ -117,6 +129,42 @@ lsof -ti :8888 | xargs kill -9
 rm -f /tmp/deap_capture.log
 ```
 
+### Windows（PowerShell 管理员模式）
+
+```powershell
+# 1. 起 mitmdump
+Remove-Item "$env:TEMP\deap_capture.log" -ErrorAction SilentlyContinue
+Start-Process -NoNewWindow mitmdump -ArgumentList "-p 8888 -s scripts\cap_deap.py"
+Start-Sleep 3
+Get-NetTCPConnection -LocalPort 8888 -ErrorAction SilentlyContinue  # 确认监听
+
+# 2. 开系统级代理（设置注册表 + WinHTTP）
+Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyEnable -Value 1
+Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyServer -Value "127.0.0.1:8888"
+netsh winhttp set proxy proxy-server="127.0.0.1:8888"
+
+# 3. 触发 daemon 发一次 chat（daemon 须已登录运行）
+& "C:\Program Files\Wukong\0.9.65-26061702\bin\wukong-cli.exe" -p "在" --output-format json --quiet
+
+# 4. 提取 key
+Select-String -Path "$env:TEMP\deap_capture.log" -Pattern "Bearer sk-[0-9a-z]{32}" | Select-Object -Last 1 | ForEach-Object { $_.Matches.Value.Split(' ')[1] }
+
+# 5. 校验（需 curl，Windows 10/11 自带）
+curl -s -m 30 https://api-deap.dingtalk.com/dingtalk/v1/chat/completions ^
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" ^
+  -H "x-dingtalk-user-type: vip" -H "x-dingtalk-scenario-code: com.dingtalk.scenario.wukong" ^
+  -H "x-dingtalk-product-code: AI_WUKONG" -H "x-dingtalk-ability-code: M_AI_WUKONG" ^
+  -d "{\"model\":\"dingtalk-auto\",\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+
+# 6. 写入 .env（同 macOS）
+
+# 7. 还原（必做）：关系统代理 + 停 mitm + 焚日志
+Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyEnable -Value 0
+netsh winhttp reset proxy
+Get-NetTCPConnection -LocalPort 8888 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+Remove-Item "$env:TEMP\deap_capture.log" -ErrorAction SilentlyContinue
+```
+
 </details>
 
 ## 排错速查
@@ -124,17 +172,20 @@ rm -f /tmp/deap_capture.log
 | 现象 | 原因 | 处置 |
 |---|---|---|
 | **抓不到 key（最常见）** | **`.real` daemon 没就绪**：CLI 连不上 daemon，不发 chat | `wukong-cli service status` 查；正常打开 Wukong App（完整界面+登录）或 `service start`。App 在跑 ≠ daemon 就绪 |
-| 抓不到 key，且 mitm 完全无流量 | daemon 没发请求（上一条）/ 复用 keep-alive 旧连接 / 没走 deap | 先看 `/tmp/deap_mitm.log` 有无 CONNECT；确认 daemon 就绪 |
+| 抓不到 key，且 mitm 完全无流量 | daemon 没发请求（上一条）/ 复用 keep-alive 旧连接 / 没走 deap | 先看 `/tmp/deap_mitm.log`（macOS）或 `%TEMP%\deap_mitm.log`（Windows）有无 CONNECT；确认 daemon 就绪 |
 | 系统代理被抢占（脚本立即中止） | Clash/Surge/Stash 等开了 System Proxy，把 8888 改成自己端口 | 关掉该客户端的系统代理开关（或临时退出），再重跑 |
 | 抓到 key 但校验 401 | key 过期 / 截断 / 抓到旧值 | 重抓；正则用 `sk-[0-9a-z]{32}` |
 | 抓到 key 但校验 **402 quotaExceeded** | **账号配额超限，不是 key 失效** | 重抓大概率仍 402；等账号配额重置或换登录账号 |
 | 代理 406 | 给流式加了 `Accept: text/event-stream` | 删该头（deap 会因它 406），见 `src/deapClient.ts` |
-| 用完悟空上不了网 | 系统代理忘关 / server:port 被写成 8888 未还原 | `networksetup -setwebproxystate "Wi-Fi" off` + secure 同理（新版 cleanup 已自动还原原值） |
-| sudo 密码错 | — | 重新输入；脚本不存密码 |
+| macOS：用完悟空上不了网 | 系统代理忘关 / server:port 被写成 8888 未还原 | `networksetup -setwebproxystate "Wi-Fi" off` + secure 同理（新版 cleanup 已自动还原原值） |
+| Windows：管理员权限不足 | 脚本运行时报 Access Denied 或退出码非 0 | 右键 PowerShell/cmd → 「以管理员身份运行」 |
+| Windows：代理设置了但不起作用 | WinHTTP 和 WinINet 双通道代理 | 脚本已同时设置注册表（WinINet）+ `netsh winhttp`（WinHTTP），自动覆盖全部 |
+| Windows：`Get-NetTCPConnection` 失败 | 某些精简版 Win10/Nano Server 缺该 cmdlet | 回退到 `netstat -ano \| findstr :8888`（需注意中文 locale：用 `监听` 替代 `LISTENING`） |
+| Windows：中文 netstat 输出 `监听` 而非 `LISTENING` | Windows 简体中文版本地化 | 脚本已用 PowerShell `Get-NetTCPConnection` 规避 locale 问题 |
 
 ## 安全红线
 
 1. **`.env` 与 key 永不进 git**——写前 `git check-ignore .env` 必须过；抓包日志含明文 key，用完即焚。
 2. **用完必关系统代理**（脚本在 finally 里保证；手动时务必执行第 7 步），否则全局流量持续走代理。
 3. **仅对本机、本人已登录悟空**——这是授权的本地分析。
-4. **sudo 只用于信任 CA（一次性）与开/关系统代理**；密码运行时手动输入、不落盘。
+4. **sudo / 管理员权限**只用于信任 CA（一次性）与开/关系统代理；密码运行时手动输入、不落盘。Windows 管理员模式下 `reg add` / `netsh` 实时生效。

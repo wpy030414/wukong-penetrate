@@ -42,9 +42,16 @@ import { settings } from '../src/config';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 const CAP_SCRIPT = path.join(__dirname, 'cap_deap.py');
-const LOG = '/tmp/deap_capture.log';   // cap_deap.py 写的抓包日志（含明文 Authorization）
-const MITM_LOG = '/tmp/deap_mitm.log'; // mitmdump 自身输出
-const CLI_LOG = '/tmp/deap_cli.log';   // wukong-cli 输出
+
+/** 平台检测 */
+const IS_WINDOWS = process.platform === 'win32';
+const IS_MACOS = process.platform === 'darwin';
+
+// 日志路径：macOS 用 /tmp/，Windows 用 %TEMP%（cap_deap.py 也需要同步改写 LOG）
+const TMP_DIR = IS_WINDOWS ? (process.env.TEMP || process.env.TMP || path.join(os.homedir(), 'AppData', 'Local', 'Temp')) : '/tmp';
+const LOG = path.join(TMP_DIR, 'deap_capture.log');   // cap_deap.py 写的抓包日志（含明文 Authorization）
+const MITM_LOG = path.join(TMP_DIR, 'deap_mitm.log'); // mitmdump 自身输出
+const CLI_LOG = path.join(TMP_DIR, 'deap_cli.log');   // wukong-cli 输出
 const PROXY_PORT = 8888;
 const ENV_PATH = path.join(REPO_ROOT, '.env');
 const WAIT_MS = 45000;
@@ -85,9 +92,6 @@ function sh(cmd: string): ShResult {
 
 // ==================== 平台抽象层 ====================
 
-/** 平台检测 */
-const IS_WINDOWS = process.platform === 'win32';
-const IS_MACOS = process.platform === 'darwin';
 
 /** 平台抽象接口 */
 interface Platform {
@@ -159,21 +163,38 @@ class MacOSPlatform implements Platform {
 
 /** Windows 实现 */
 class WindowsPlatform implements Platform {
+  /** Internet Options 注册表路径（WinINet 系统代理） */
+  private readonly IE_OPTIONS = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+
   getProxy(which: 'web' | 'secure'): ProxyCfg {
-    // Windows 用 netsh winhttp show proxy
+    // 优先 WinHTTP（由 netsh 设置，Rust reqwest 等使用）
     const out = sh('netsh winhttp show proxy').out;
-    // 解析输出：当前 WinHTTP 代理设置: 代理服务器: 127.0.0.1:8888 绕过列表: ...
     const proxyMatch = out.match(/代理服务器:\s*(\S+):(\d+)/i) || out.match(/Proxy Server\(s\):\s*(\S+):(\d+)/i);
     if (proxyMatch) {
       return { server: proxyMatch[1], port: proxyMatch[2], enabled: true };
+    }
+    // 兜底 Internet Options 注册表（WinINet，传统桌面应用）
+    const enR = sh(`reg query "${this.IE_OPTIONS}" /v ProxyEnable 2>nul`);
+    if (enR.code === 0 && /0x1/i.test(enR.out)) {
+      const svR = sh(`reg query "${this.IE_OPTIONS}" /v ProxyServer 2>nul`).out;
+      const svM = svR.match(/(\S+):(\d+)/);
+      if (svM) return { server: svM[1], port: svM[2], enabled: true };
     }
     return { server: '', port: '', enabled: false };
   }
 
   setProxy(which: 'web' | 'secure', server: string, port: string, enabled: boolean): boolean {
     if (enabled) {
+      // WinINet 系统代理（Internet Options 注册表）
+      sh(`reg add "${this.IE_OPTIONS}" /v ProxyEnable /t REG_DWORD /d 1 /f 2>nul`);
+      sh(`reg add "${this.IE_OPTIONS}" /v ProxyServer /t REG_SZ /d "${server}:${port}" /f 2>nul`);
+      sh(`reg add "${this.IE_OPTIONS}" /v ProxyOverride /t REG_SZ /d "<local>" /f 2>nul`);
+      // WinHTTP（Rust reqwest 等使用）
       sh(`netsh winhttp set proxy proxy-server="${server}:${port}"`);
     } else {
+      // 关闭 WinINet 代理
+      sh(`reg add "${this.IE_OPTIONS}" /v ProxyEnable /t REG_DWORD /d 0 /f 2>nul`);
+      // 关闭 WinHTTP 代理
       sh('netsh winhttp reset proxy');
     }
     // 校验
@@ -182,8 +203,9 @@ class WindowsPlatform implements Platform {
   }
 
   isPortListening(port: number): boolean {
-    const r = sh(`netstat -ano | findstr :${port} | findstr LISTENING`);
-    return r.out.trim().length > 0;
+    // PowerShell Get-NetTCPConnection（跨 locale，不受 LISTENING/监听 影响）
+    const r = sh(`powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"`);
+    return r.code === 0;
   }
 
   killProcess(pid: string): void {
@@ -191,25 +213,16 @@ class WindowsPlatform implements Platform {
   }
 
   killPortProcess(port: number): void {
-    // Windows: 找到 PID 再杀
-    const r = sh(`netstat -ano | findstr :${port} | findstr LISTENING`);
-    const pids = r.out.split('\n').map(line => {
-      const parts = line.trim().split(/\s+/);
-      return parts[parts.length - 1];
-    }).filter(Boolean);
-    for (const pid of pids) {
-      sh(`taskkill /F /PID ${pid} 2>nul`);
-    }
+    sh(`powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id \$_.OwningProcess -Force }" 2>nul`);
   }
 
   isCaTrusted(caPath: string): boolean {
-    // Windows: 检查证书是否在 Trusted Root
-    const r = sh(`certutil -verify -urlfetch "${caPath}" 2>nul`);
-    return r.code === 0;
+    // Windows: 确认 cert 在受信任根存储区（而非 AIA 在线验证，certutil -verify 瞎说可信）
+    const r = sh(`certutil -verifystore "Root" mitmproxy 2>nul`);
+    return r.code === 0 && /mitmproxy/i.test(r.out);
   }
 
   trustCa(caPath: string): boolean {
-    // Windows: 添加到 Trusted Root（需管理员权限）
     const r = sh(`certutil -addstore -f "Root" "${caPath}"`);
     return r.code === 0;
   }
@@ -227,6 +240,10 @@ const platform: Platform = IS_WINDOWS ? new WindowsPlatform() : new MacOSPlatfor
 
 /** 系统代理是否真的指向 mitmdump（server+port+enabled 三者都对）*/
 function proxyPointsToMitm(which: 'web' | 'secure'): boolean {
+  if (IS_WINDOWS) {
+    // Windows: 没有系统代理概念，改检查 mitmdump 是否仍在监听
+    return platform.isPortListening(PROXY_PORT);
+  }
   const c = platform.getProxy(which);
   return c.enabled && c.server === '127.0.0.1' && c.port === String(PROXY_PORT);
 }
@@ -234,7 +251,7 @@ function proxyPointsToMitm(which: 'web' | 'secure'): boolean {
 /** 检测会持续抢占系统代理的客户端（Clash Verge / Mihomo / Surge / Stash 等）*/
 function detectCompetingProxy(): string | null {
   const ps = IS_WINDOWS
-    ? sh('tasklist /FO CSV 2>nul').out
+    ? sh('powershell -NoProfile -Command "(Get-Process).Name" 2>nul').out
     : sh('ps -Axo comm= 2>/dev/null').out;
   const rules: Array<[RegExp, string]> = [
     [/clash-verge|verge-mihomo|mihomo/i, 'Clash Verge / Mihomo'],
@@ -249,9 +266,29 @@ function detectCompetingProxy(): string | null {
 
 /** 查找 wukong-cli */
 function findWukongCli(): string | null {
+  // —— Windows：动态搜索 C:\Program Files\Wukong\<版本>\bin\wukong-cli.exe ——
+  if (IS_WINDOWS) {
+    const wukongDir = 'C:\\Program Files\\Wukong';
+    try {
+      const versions = fs.readdirSync(wukongDir).filter(d => {
+        // 版本目录形如 "0.9.65-26061702"
+        return /^\d+\.\d+\.\d+-.+$/.test(d) && fs.existsSync(path.join(wukongDir, d, 'bin', 'wukong-cli.exe'));
+      });
+      // 按版本号降序排列（取最新版本）
+      versions.sort((a, b) => b.localeCompare(a));
+      if (versions.length > 0) {
+        return path.join(wukongDir, versions[0], 'bin', 'wukong-cli.exe');
+      }
+    } catch { /* 目录不存在或无权限 */ }
+  }
+
   const candidates = [
     process.env.WUKONG_CLI_PATH,
-    IS_WINDOWS ? 'C:\\Program Files\\Wukong\\wukong-cli.exe' : '/Applications/Wukong.app/Contents/MacOS/wukong-cli',
+    // Windows 固定安装路径
+    IS_WINDOWS ? 'C:\\Program Files\\Wukong\\wukong-cli.exe' : null,
+    // macOS 固定路径
+    IS_MACOS ? '/Applications/Wukong.app/Contents/MacOS/wukong-cli' : null,
+    // ~/.real/bin 下的 CLI（两平台通用兜底）
     path.join(os.homedir(), '.real', 'bin', IS_WINDOWS ? 'wukong-cli.exe' : 'wukong-cli'),
   ].filter((c): c is string => Boolean(c));
   for (const c of candidates) {
@@ -261,28 +298,175 @@ function findWukongCli(): string | null {
   return platform.findExecutable(IS_WINDOWS ? 'wukong-cli.exe' : 'wukong-cli');
 }
 
+// —— Windows 系统代理管理 + daemon 重启 ——
+const IE_OPTIONS = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+let CLASH_PATH: string | null = null;
+let CLASH_WAS_RUNNING = false;
+let ORIG_PROXY: { enabled: boolean; server: string } = { enabled: false, server: '' };
+
+/** Windows：准备代理环境（停 Clash → 设 8888 → 重启 daemon 读新代理） */
+async function windowsPrepareProxy(): Promise<boolean> {
+  if (!IS_WINDOWS) return true;
+
+  // 1. 快照原始代理
+  const eR = sh(`powershell -NoProfile -Command "(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings').ProxyEnable"`);
+  const sR = sh(`powershell -NoProfile -Command "(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings').ProxyServer"`);
+  ORIG_PROXY = { enabled: eR.out.trim() === '1', server: sR.out.trim() };
+
+  // 2. 停 Clash Verge（以免它抢回代理设置）
+  const clashPs = sh(`powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"name like 'clash-verge%' or name like 'verge-mihomo%' or name like 'mihomo%'\\" | Select-Object ExecutablePath"`);
+  const pathMatch = clashPs.out.match(/ExecutablePath\s+:\s+(.+)/i);
+  if (pathMatch) CLASH_PATH = pathMatch[1].trim();
+  CLASH_WAS_RUNNING = clashPs.code === 0 && clashPs.out.trim().length > 0;
+  if (CLASH_WAS_RUNNING) {
+    sh(`powershell -NoProfile -Command "Get-Process clash-verge,verge-mihomo,mihomo -ErrorAction SilentlyContinue | Stop-Process -Force"`);
+    console.log('   ⏸ Clash Verge 已暂停');
+  } else {
+    console.log('   Clash Verge 未运行');
+  }
+
+  // 3. 设系统代理为 127.0.0.1:8888
+  sh(`powershell -NoProfile -Command "Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' ProxyEnable 1; Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' ProxyServer '127.0.0.1:8888'"`);
+  console.log('   📡 系统代理已设为 127.0.0.1:8888（注册表 WinINet）');
+
+  // 4. 重启 daemon（让它读到新代理值）
+  const daemonExe = sh(`powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter \\"name='DingTalkReal.exe'\\" | Select-Object -ExpandProperty ExecutablePath)"`).out.trim();
+  if (daemonExe) {
+    sh(`powershell -NoProfile -Command "Get-Process DingTalkReal -ErrorAction SilentlyContinue | Stop-Process -Force"`);
+    await sleep(2000); // 等进程退出
+    sh(`start "" "${daemonExe}"`);
+    console.log('   🔄 Daemon 已重启（读取新代理 127.0.0.1:8888）');
+    // 等 daemon 就绪
+    for (let i = 0; i < 15; i++) {
+      await sleep(1000);
+      const r = sh(`"${CLI}" service status 2>nul`);
+      if (r.code === 0 && !/not running|未运行|未启动/i.test(r.out)) {
+        console.log(`   ✅ Daemon 就绪（约 ${i + 1}s）`);
+        return true;
+      }
+    }
+    fail('daemon 重启后未就绪');
+    return false;
+  } else {
+    // daemon 原来没跑 — 正常启动它
+    const cliDir = path.dirname(CLI || '');
+    const daemonPath = path.resolve(cliDir, '..', 'DingTalkReal.exe');
+    if (fs.existsSync(daemonPath)) {
+      sh(`start "" "${daemonPath}"`);
+      console.log('   🔄 Daemon 已启动');
+      for (let i = 0; i < 15; i++) {
+        await sleep(1000);
+        const r = sh(`"${CLI}" service status 2>nul`);
+        if (r.code === 0 && !/not running|未运行|未启动/i.test(r.out)) {
+          console.log(`   ✅ Daemon 就绪（约 ${i + 1}s）`);
+          return true;
+        }
+      }
+    }
+    fail('无法启动 daemon');
+    return false;
+  }
+}
+
+/** Windows：还原代理环境（恢复注册表 + 重启 Clash） */
+function windowsRestoreProxy(): void {
+  if (!IS_WINDOWS) return;
+  // 还原注册表代理
+  if (ORIG_PROXY.enabled && ORIG_PROXY.server) {
+    sh(`powershell -NoProfile -Command "Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' ProxyEnable 1; Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' ProxyServer '${ORIG_PROXY.server}'"`);
+  } else {
+    sh(`powershell -NoProfile -Command "Set-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' ProxyEnable 0"`);
+  }
+  console.log('   🧹 系统代理已还原');
+  // 重启 Clash
+  if (CLASH_WAS_RUNNING && CLASH_PATH) {
+    sh(`start "" "${CLASH_PATH}"`);
+    console.log('   ▶ Clash Verge 已重启');
+  }
+}
+
 // —— daemon 就绪检测 / 拉起（真正的闸门：~/.real/daemon.sock）——
 let CLI: string | null = null;
 
 function daemonReady(): boolean {
   if (!CLI) return false;
   const r = sh(`"${CLI}" service status`);
-  return r.code === 0 && !/not running/i.test(r.out);
+  // 兼容多 locale：中 / 英均识别
+  return r.code === 0 && !/not running|未运行|未启动/i.test(r.out);
+}
+
+/** Windows：检测 named pipe \\.\pipe\real-daemon 是否存在（取代已弃用的 wmic） */
+function windowsDaemonPipeExists(): boolean {
+  if (!IS_WINDOWS) return false;
+  // Test-Path 在 PowerShell 中可直接检测 named pipe 是否存在（\\.\pipe\ 是 NT 设备命名空间）
+  const r = sh(`powershell -NoProfile -Command "Test-Path '\\\\.\\pipe\\real-daemon'"`);
+  if (r.code === 0 && /true/i.test(r.out)) return true;
+  // 兜底：尝试连接 pipe（超时 0）
+  const r2 = sh(`powershell -NoProfile -Command "try { \$p = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'real-daemon', [System.IO.Pipes.PipeDirection]::In); \$p.Connect(0); Write-Host 'pipe_ok'; \$p.Close() } catch {}"`);
+  return /pipe_ok/i.test(r2.out);
+}
+
+/** 检测是否在跑 DingTalkReal --app-relaunched 后台实例（不含完整 daemon） */
+function isAppRelaunchedInstance(): boolean {
+  const ps = IS_WINDOWS
+    ? sh(`powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"name='DingTalkReal.exe'\\" | Select-Object -ExpandProperty CommandLine" 2>nul`).out
+    : sh('ps -Axo command= 2>/dev/null').out;
+  return /--app-relaunched/i.test(ps);
 }
 
 async function ensureDaemonReady(): Promise<boolean> {
   if (daemonReady()) return true;
-  console.log('   .real daemon 未就绪，尝试 `wukong-cli service start` 拉起…');
-  sh(`"${CLI}" service start`);
+
+  // Windows：额外检查 named pipe（CLI 可能因为路径问题查不到，但 pipe 实际存在）
+  if (IS_WINDOWS && windowsDaemonPipeExists()) {
+    ok('Windows named pipe \\.\pipe\\real-daemon 存在，daemon 实际就绪');
+    // 再验证一次 CLI 能连上
+    const r = sh(`"${CLI}" service status`);
+    if (r.code === 0 && !/not running|未运行|未启动/i.test(r.out)) return true;
+    // pipe 存在但 CLI 报 not running → 可能是 CLI 版本与 daemon 版本不匹配
+    console.log('   ⚠️ named pipe 存在但 CLI 报 not running，可能是版本不匹配。尝试 service start…');
+  }
+
+  // 检测后台实例
+  if (isAppRelaunchedInstance()) {
+    fail('.real daemon 未就绪，且检测到 `DingTalkReal --app-relaunched` 后台实例（不含完整 daemon）。');
+    console.error('   后台实例无法启动完整 daemon，请任选其一让其就绪：');
+    console.error('     1) 退出该后台实例，正常打开 Wukong App（完整界面并登录），等 daemon 赟来；');
+    console.error('     2) 或安装含完整 daemon 的悟空版本；');
+    console.error(`     3) 就绪验证：运行 "${CLI}" service status 应显示 running（退出码 0）。`);
+    return false;
+  }
+
+  console.log('   .real daemon 未就绪，尝试拉起…');
+  if (IS_WINDOWS) {
+    // Windows: 直接运行 DingTalkReal.exe（service start 不支持）
+    const daemonPath = path.resolve(path.dirname(CLI || ''), '..', 'DingTalkReal.exe');
+    if (fs.existsSync(daemonPath)) {
+      sh(`start "" "${daemonPath}"`);
+    } else {
+      fail('找不到 DingTalkReal.exe');
+      return false;
+    }
+  } else {
+    sh(`"${CLI}" service start`);
+  }
   for (let i = 0; i < 15; i++) {
     await sleep(1000);
-    if (daemonReady()) { console.log(`   .real daemon 已拉起（约 ${i + 1}s）`); return true; }
+    if (daemonReady()) { console.log(`   .real daemon 已拉起（约 ${i + 1}）`); return true; }
+    // Windows：也检查 pipe
+    if (IS_WINDOWS && windowsDaemonPipeExists()) {
+      ok(`   .real daemon 已拉起（named pipe 就绪，约 ${i + 1}）`);
+      return true;
+    }
   }
-  fail('.real daemon 未就绪，service start 也拉不起来 —— wukong-cli 连不上 daemon，触发不了 chat。');
-  console.error('   注意：当前若跑的是 `DingTalkReal --app-relaunched` 后台实例，它不带完整 daemon。请任选其一让其就绪：');
-  console.error('     1) 退出该后台实例，正常打开 Wukong App（完整界面并登录），等 daemon 起来；');
+  fail('.real daemon 未就绪，无法拉起 —— wukong-cli 连不上 daemon，触发不了 chat。');
+  console.error('   请任选其一让其就绪：');
+  console.error('     1) 正常打开 Wukong App（完整界面并登录），等 daemon 赟来；');
   console.error('     2) 或安装含完整 daemon 的悟空版本；');
   console.error(`     3) 就绪验证：运行 "${CLI}" service status 应显示 running（退出码 0）。`);
+  if (IS_WINDOWS) {
+    console.error(`     4) Windows 也可检查 named pipe：PowerShell 查看 [System.IO.Directory]::GetFiles('\\\\.\\\\pipe\\\\') 是否含 real-daemon`);
+  }
   return false;
 }
 
@@ -407,6 +591,7 @@ async function extractKey(): Promise<string | null> {
   step('等待并提取 Bearer key');
   const deadline = Date.now() + WAIT_MS;
   let lastProxyCheck = 0;
+  let lastMitmCheck = 0;
   while (Date.now() < deadline) {
     const content = readFileSafe(LOG);
     const matches = [...content.matchAll(/Bearer (sk-[0-9a-z]{32})/g)].map((m) => m[1]);
@@ -415,6 +600,7 @@ async function extractKey(): Promise<string | null> {
       ok(`提取到 key: ${mask(key)}`);
       return key;
     }
+
     // 早停（~5s 节流）：代理真脱离 8888 就别干等
     if (Date.now() - lastProxyCheck >= 5000) {
       lastProxyCheck = Date.now();
@@ -423,6 +609,21 @@ async function extractKey(): Promise<string | null> {
         return null;
       }
     }
+
+    // 诊断（~10s）：检查 mitmdump 是否收到任何流量
+    if (Date.now() - lastMitmCheck >= 10000) {
+      lastMitmCheck = Date.now();
+      const mitmOut = readFileSafe(MITM_LOG);
+      if (!/CONNECT|GET |POST /i.test(mitmOut)) {
+        console.log('   ⚠️ mitmdump 仍未收到流量 — daemon 可能没走代理。再触发一次…');
+        const retryFd = fs.openSync(CLI_LOG + '.retry', 'w');
+        spawn(CLI as string, ['-p', '在', '--output-format', 'json', '--quiet'], { stdio: ['ignore', retryFd, retryFd] });
+        setTimeout(() => { try { fs.closeSync(retryFd); } catch {} }, 5000);
+      } else {
+        console.log('   ✓ mitmdump 已收到流量，继续等待 Bearer key 出现…');
+      }
+    }
+
     await sleep(1500);
   }
   fail(`等待 ${WAIT_MS / 1000}s 未抓到 key`);
@@ -443,19 +644,34 @@ async function askOrgName(): Promise<string> {
 // —— 失败诊断 ——
 function diagnoseFailure(): void {
   console.log('\n🔎 失败诊断（对照 docs/CAPTURE_DEAP_KEY.md 排错表）：');
-  const web = proxyPointsToMitm('web');
-  const secure = proxyPointsToMitm('secure');
-  console.log(`   ① 系统代理此刻是否指向 mitm: web=${web} secure=${secure}`);
-  if (!web || !secure) {
-    console.log(`      → 代理已不在 8888：daemon 流量没进 mitmdump，必然抓不到。`);
-    console.log(`         关掉 Clash Verge / Surge 等的「System Proxy」开关，或临时退出它们，再重跑。`);
+  if (IS_WINDOWS) {
+    const alive = platform.isPortListening(PROXY_PORT);
+    console.log(`   ① mitmdump 是否还在 127.0.0.1:${PROXY_PORT}: ${alive ? '是' : '否'}`);
+    if (!alive) console.log(`      → mitmdump 已退出。可能是端口冲突或 Clash 重启后占回。`);
+  } else {
+    const web = proxyPointsToMitm('web');
+    const secure = proxyPointsToMitm('secure');
+    console.log(`   ① 系统代理此刻是否指向 mitm: web=${web} secure=${secure}`);
+    if (!web || !secure) {
+      console.log(`      → 代理已不在 8888：daemon 流量没进 mitmdump，必然抓不到。`);
+      console.log(`         关掉 Clash Verge / Surge 等的「System Proxy」开关，或临时退出它们，再重跑。`);
+    }
   }
   const mitmLog = readFileSafe(MITM_LOG);
   const sawAny = /CONNECT|GET |POST |PUT /i.test(mitmLog);
   const sawDeap = /api-deap|deap|dingtalk/i.test(mitmLog);
   console.log(`   ② mitmdump 是否收到流量: ${sawAny ? '是' : '否'}${sawDeap ? '，且含 deap 相关' : '，未见 deap'}`);
   if (sawAny && !sawDeap) console.log(`      → 有流量但无 deap：daemon 可能复用了 keep-alive 旧连接，或触发的 prompt 没走 deap 网关。`);
-  if (!sawAny) console.log(`      → 完全无流量：daemon 根本没经过 mitmdump（代理被抢 / daemon 没真正发 chat）。`);
+  if (!sawAny) {
+    console.log(`      → 完全无流量：daemon 根本没经过 mitmdump（Clash 未被停掉 / daemon 没发 chat）。`);
+    if (IS_WINDOWS) {
+      console.log(`      → Windows 排查：`);
+      console.log(`         1) netstat -ano | findstr :7897 确认 mitmdump 在监听`);
+      console.log(`         2) 若有其他 CLOSE_WAIT 残留连接，等 30s 后重试`);
+      console.log(`         3) 确认 Clash Verge 已被停掉（ps 无 clash-verge/mihomo 进程）`);
+      console.log(`         4) 重启 daemon：wukong-cli service stop && wukong-cli service start`);
+    }
+  }
   if (/error|tls|certificate|alert/i.test(mitmLog)) console.log(`      → mitm 日志含 TLS/cert 关键词：daemon 可能改了证书校验（pinning），见 ${MITM_LOG}。`);
   const cliLog = readFileSafe(CLI_LOG);
   const cliErr = /error|fail|refused|not found|no such|denied|timeout/i.test(cliLog);
@@ -564,13 +780,15 @@ let proxySnap: { web: ProxyCfg; secure: ProxyCfg } | null = null;
 let attempted = false;
 
 function cleanup(success: boolean): void {
-  if (proxySnap) {
+  if (IS_WINDOWS) {
+    windowsRestoreProxy();
+  } else if (proxySnap) {
     restoreProxy(proxySnap);
     console.log(success ? '🧹 系统代理已还原（原始 server:port + state）' : '🧹 系统代理已还原为抓包前的原始值');
   }
   if (mitm) { try { mitm.kill('SIGKILL'); } catch {} mitm = null; }
   if (mitmFd !== null) { try { fs.closeSync(mitmFd); } catch {} mitmFd = null; }
-  platform.killPortProcess(PROXY_PORT);
+  if (!IS_WINDOWS) platform.killPortProcess(PROXY_PORT);
   // 成功 → 焚；真正抓包过但失败 → 保留供排查；压根没到触发 → 静默焚空日志
   if (success || !attempted) {
     for (const f of [LOG, MITM_LOG, CLI_LOG]) fs.rmSync(f, { force: true });
@@ -586,14 +804,23 @@ function cleanup(success: boolean): void {
   let success = false;
   try {
     if (!(await preflight())) { process.exitCode = 1; return; }
+
+    // Windows: 设系统代理 8888 + 停 Clash + 重启 daemon
+    if (IS_WINDOWS) {
+      if (!(await windowsPrepareProxy())) { process.exitCode = 1; return; }
+    }
+
     if (!(await startMitm())) { process.exitCode = 1; return; }
 
-    // 先快照当前系统代理，cleanup 时原样还原
-    proxySnap = { web: platform.getProxy('web'), secure: platform.getProxy('secure') };
-
-    step(`开系统级 HTTP/HTTPS 代理（${NET_SERVICE} → 127.0.0.1:${PROXY_PORT}，校验 server:port）`);
-    if (!enableSystemProxy()) { process.exitCode = 1; return; }
-    ok('系统代理已开启且确实指向 mitmdump');
+    if (IS_WINDOWS) {
+      console.log(`   Daemon 已重启并读取新代理 127.0.0.1:${PROXY_PORT}，流量走 mitmdump`);
+    } else {
+      // macOS: 快照当前系统代理，设置系统代理
+      proxySnap = { web: platform.getProxy('web'), secure: platform.getProxy('secure') };
+      step(`开系统级 HTTP/HTTPS 代理（${NET_SERVICE} → 127.0.0.1:${PROXY_PORT}，校验 server:port）`);
+      if (!enableSystemProxy()) { process.exitCode = 1; return; }
+      ok('系统代理已开启且确实指向 mitmdump');
+    }
 
     attempted = true;
     trigger();

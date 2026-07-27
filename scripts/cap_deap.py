@@ -10,10 +10,15 @@ cap_deap.py — mitmproxy 抓包脚本：捕获钉钉悟空发往 deap 网关的
     /tmp/deap_capture.log  （含完整请求头，含明文 Authorization，属敏感文件，用完即焚）
 """
 
+import os
+import platform
 from mitmproxy import http
 import datetime
 
-LOG = "/tmp/deap_capture.log"
+# 跨平台日志路径：Windows 用 %TEMP%，macOS/Linux 用 /tmp
+TMP_DIR = os.environ.get("TEMP", os.environ.get("TMP", "/tmp")) if platform.system() == "Windows" else "/tmp"
+LOG = os.path.join(TMP_DIR, "deap_capture.log")
+
 
 
 def log(s: str) -> None:
