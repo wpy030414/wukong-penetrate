@@ -1,24 +1,22 @@
 {
-  "name": "wukong-penetrate",
   "version": "0.1.0",
-  "description": "钉钉悟空模型穿透为 Anthropic 服务 — 直连 deap 网关的 Anthropic 兼容代理 (DingTalk Wukong model penetration to an Anthropic-compatible API)",
+  "name": "xrl-router-plugin-wukong",
+  "description": "xrl-router 插件：钉钉 DEAP 协议桥接 — 纯无状态翻译层，注入 DEAP 业务头并透传密钥",
   "scripts": {
     "capture-key": "tsx scripts/capture-key.ts",
     "serve": "tsx watch src/index.ts"
   },
   "dependencies": {
-    "cheerio": "^1.2.0",
-    "cli-table3": "^0.6.5",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "uuid": "^9.0.0"
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^20.10.0",
-    "@types/uuid": "^9.0.7",
+    "@types/ws": "^8.5.10",
     "tsx": "^4.6.2",
     "typescript": "^5.3.2"
   }

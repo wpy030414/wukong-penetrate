@@ -4,7 +4,7 @@
  *
  * 跨平台支持：macOS + Windows
  *
- * 已验证的可行链路（详见 docs/CAPTURE_DEAP_KEY.md）：
+ * 已验证的可行链路（详见 docs/README.md）：
  *   daemon（DingTalkReal）的 chat 客户端【无视 HTTPS_PROXY 环境变量】，但【认系统级 HTTP 代理】。
  *   所以：开系统代理→8888 → 用 wukong-cli -p 触发 daemon 发 chat → mitmdump 抓到
  *   带完整 `Authorization: Bearer sk-...` 的 /chat/completions → 校验 → 写 .env → 还原系统代理。
@@ -57,7 +57,7 @@ const ENV_PATH = path.join(REPO_ROOT, '.env');
 const WAIT_MS = 45000;
 const NET_SERVICE = process.env.CAPTURE_NET_SERVICE || 'Wi-Fi'; // 主用网络接口名（macOS 用）
 
-const DEAP_BASE_URL = settings.deapBaseUrl;
+const DEAP_BASE_URL = settings.baseUrl;
 
 /** deap 业务头：直接复用 src/config.ts 的 settings，消除重复定义 */
 const DEAP_HEADERS: Record<string, string> = {
@@ -630,20 +630,41 @@ async function extractKey(): Promise<string | null> {
   return null;
 }
 
-/** 交互式询问用户输入密钥备注名 */
-async function askOrgName(): Promise<string> {
-  const rl = (await import('node:readline')).createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question('   🔖 请输入该密钥的备注名（回车默认为"无"）: ', (answer: string) => {
-      rl.close();
-      resolve(answer.trim() || '无');
-    });
-  });
-}
+// —— 写 .env（操作 CAPTURED_KEYS 行，追加 / 新增，不碰其他变量）——
+function writeEnv(key: string): boolean {
+  step('写入 CAPTURED_KEYS 到 .env');
+  if (sh(`cd "${REPO_ROOT}" && git check-ignore .env`).code !== 0) {
+    fail('.env 未被 git 忽略！为防止泄露已中止。请先把 .env 加入 .gitignore');
+    return false;
+  }
+  const lines = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, 'utf8').split('\n') : [];
 
+  const keysIdx = lines.findIndex((l) => l.startsWith('CAPTURED_KEYS='));
+
+  if (keysIdx >= 0) {
+    const raw = lines[keysIdx].slice('CAPTURED_KEYS='.length).trim();
+    const existing = raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+    if (existing.includes(key)) {
+      ok(`密钥已存在于 CAPTURED_KEYS 池中（${mask(key)}），无需重复添加`);
+      return true;
+    }
+    existing.push(key);
+    lines[keysIdx] = `CAPTURED_KEYS=${existing.join(',')}`;
+    console.log(`   已追加密钥 ${mask(key)}，池中共 ${existing.length} 个密钥`);
+  } else {
+    lines.push(`CAPTURED_KEYS=${key}`);
+    console.log(`   已新增 CAPTURED_KEYS=${mask(key)}`);
+  }
+
+  const content = lines.filter((l, i) => !(l === '' && i === lines.length - 1)).join('\n').replace(/\n{3,}/g, '\n\n');
+  fs.writeFileSync(ENV_PATH, content + '\n', { mode: 0o600 });
+  fs.chmodSync(ENV_PATH, 0o600);
+  ok(`已写入 ${ENV_PATH}（mode 600，git-ignored）`);
+  return true;
+}
 // —— 失败诊断 ——
 function diagnoseFailure(): void {
-  console.log('\n🔎 失败诊断（对照 docs/CAPTURE_DEAP_KEY.md 排错表）：');
+  console.log('\n🔎 失败诊断（对照 docs/README.md 排错表）：');
   if (IS_WINDOWS) {
     const alive = platform.isPortListening(PROXY_PORT);
     console.log(`   ① mitmdump 是否还在 127.0.0.1:${PROXY_PORT}: ${alive ? '是' : '否'}`);
@@ -718,63 +739,6 @@ async function validateKey(key: string): Promise<boolean> {
   }
 }
 
-// —— 写 .env（操作 DEAP_API_KEYS 行 + KEYS_NAME 行，追加 / 新增，不碰其他变量）——
-function writeEnv(key: string, orgName: string): boolean {
-  step('写入 DEAP_API_KEYS + KEYS_NAME 到 .env');
-  if (sh(`cd "${REPO_ROOT}" && git check-ignore .env`).code !== 0) {
-    fail('.env 未被 git 忽略！为防止泄露已中止。请先把 .env 加入 .gitignore');
-    return false;
-  }
-  const lines = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, 'utf8').split('\n') : [];
-
-  // —— DEAP_API_KEYS ——
-  const keysIdx = lines.findIndex((l) => l.startsWith('DEAP_API_KEYS='));
-  let keyCount = 0;
-
-  if (keysIdx >= 0) {
-    const raw = lines[keysIdx].slice('DEAP_API_KEYS='.length).trim();
-    const existing = raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : [];
-    if (existing.includes(key)) {
-      ok(`密钥已存在于 DEAP_API_KEYS 池中（${mask(key)}），无需重复添加`);
-      return true;
-    }
-    existing.push(key);
-    lines[keysIdx] = `DEAP_API_KEYS=${existing.join(',')}`;
-    keyCount = existing.length;
-    console.log(`   已追加密钥 ${mask(key)}，池中共 ${existing.length} 个密钥`);
-  } else {
-    lines.push(`DEAP_API_KEYS=${key}`);
-    keyCount = 1;
-    console.log(`   已新增 DEAP_API_KEYS=${mask(key)}`);
-  }
-
-  // —— KEYS_NAME ——
-  const nameIdx = lines.findIndex((l) => l.startsWith('KEYS_NAME='));
-  if (nameIdx >= 0) {
-    // 已有 KEYS_NAME 行：确保与 DEAP_API_KEYS 位置一一对应
-    const raw = lines[nameIdx].slice('KEYS_NAME='.length).trim();
-    const existingNames = raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : [];
-    // 补全至与密钥池等长（新 key 的备注追加在末尾）
-    while (existingNames.length < keyCount - 1) existingNames.push('无');
-    existingNames.push(orgName);
-    lines[nameIdx] = `KEYS_NAME=${existingNames.join(',')}`;
-    console.log(`   已同步 KEYS_NAME（第 ${existingNames.length} 位 = "${orgName}"）`);
-  } else {
-    // 无 KEYS_NAME 行：新建。对第 1 个 key 直接设值；后续 key 前面用"无"占位
-    const names: string[] = [];
-    while (names.length < keyCount - 1) names.push('无');
-    names.push(orgName);
-    lines.push(`KEYS_NAME=${names.join(',')}`);
-    console.log(`   已新增 KEYS_NAME="${orgName}"`);
-  }
-
-  const content = lines.filter((l, i) => !(l === '' && i === lines.length - 1)).join('\n').replace(/\n{3,}/g, '\n\n');
-  fs.writeFileSync(ENV_PATH, content + '\n', { mode: 0o600 });
-  fs.chmodSync(ENV_PATH, 0o600);
-  ok(`已写入 ${ENV_PATH}（mode 600，git-ignored）`);
-  return true;
-}
-
 // —— 清理（finally 必做）：还原原始系统代理、停 mitm；成功焚日志；真正抓包过才保留诊断日志 ——
 let proxySnap: { web: ProxyCfg; secure: ProxyCfg } | null = null;
 let attempted = false;
@@ -828,10 +792,9 @@ function cleanup(success: boolean): void {
     if (!key) { diagnoseFailure(); process.exitCode = 1; return; }
 
     if (!(await validateKey(key))) { process.exitCode = 1; return; }
-    const orgName = await askOrgName();
-    if (!writeEnv(key, orgName)) { process.exitCode = 1; return; }
+    if (!writeEnv(key)) { process.exitCode = 1; return; }
 
-    console.log(`\n🎉 完成！抓到 key ${mask(key)}（${orgName}）并已写入 DEAP_API_KEYS + KEYS_NAME。`);
+    console.log(`\n🎉 完成！抓到 key ${mask(key)} 并已写入 CAPTURED_KEYS。`);
     console.log('   重启代理后生效：lsof -ti :19067 | xargs kill -9; pnpm serve\n');
     success = true;
   } finally {
