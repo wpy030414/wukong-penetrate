@@ -88,7 +88,7 @@ if (this.connected) {
 }
 ```
 
-- `tier`：model_id 含 `opus` → `'opus'`，否则 `'custom'`
+- `tier`：统一为 `'custom'`
 - `display_name`：按通道调用 `qwenDisplayName()` 或 `wukongDisplayName()`
 
 ### close()

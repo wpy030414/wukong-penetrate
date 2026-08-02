@@ -120,4 +120,4 @@ pnpm capture-key:wukong   # wukong 密钥抓取
 - 新增网关通道（遵循 `src/channel.ts` 模式）
 - 新增 DEAP / Cosy 业务 header
 - 优化 WebSocket 重连策略
-- 新增模型映射
+- 新增模型展示名（`DISPLAY_NAMES`）

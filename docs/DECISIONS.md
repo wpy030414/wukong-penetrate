@@ -50,7 +50,7 @@
 - **可移植性**：拷贝项目 + `.env` 到新机器即可自举，无需迁移 App 的登录态文件
 - **避免竞争**：多实例部署时不会争抢 `auth-v2.dat` 的读写
 
-**证据**：`src/qwenwork/client.ts` 第 84-88 行（仅接受 `Authorization: Bearer <ory_rt_...>`，否则返回 401）喵～
+**证据**：`src/qwenwork/client.ts` 第 75-78 行（仅接受 `Authorization: Bearer <ory_rt_...>`，否则返回 401）喵～
 
 ---
 
@@ -106,7 +106,7 @@
 - OpenAI 客户端在非流式模式下期望收到完整的 JSON 对象
 - 插件需要聚合 `delta.content` + `delta.reasoning_content` + `delta.tool_calls` 等字段
 
-**证据**：`src/qwenwork/client.ts` 第 166-212 行（chunk 聚合逻辑）喵。
+**证据**：`src/qwenwork/client.ts` 第 221-268 行（chunk 聚合逻辑）喵。
 
 ---
 
@@ -138,3 +138,23 @@
 每个平台的解密逻辑完全不同，当前仅完成了 macOS 的逆向。密钥池引导（`QWEN_KEYS` 直接写入 `.env`）在任意平台均可工作，不受此限制喵。
 
 **证据**：`scripts/qwenwork/capture-key.ts` 第 57 行（平台检查）喵～
+
+---
+
+## D-10: 为什么移除模型别名映射并精简默认模型列表？
+
+**背景**：早期 `qwenwork/client.ts` 维护了 `MODEL_ALIASES`（`glm-5.2` → `qwork-advanced`）和 `resolveModel()`，`config.ts` 的默认 `AVAILABLE_MODELS` 包含 `claude-opus-4-8,gpt-4o`，注册消息中按 model_id 含 `opus` 判断 `tier`。
+
+**问题**：
+- qwenwork 通道实际上只有 `qwork-advanced` 一个可用模型，别名映射让客户端误以为可以发 `glm-5.2` 请求
+- `claude-opus-4-8` 和 `gpt-4o` 从未在 qwenwork/wukong 通道真正可用，默认列出会误导用户
+- `tier` 按 `opus` 关键字判断是脆弱的启发式逻辑
+
+**决策**：
+- 删除 `MODEL_ALIASES` 和 `resolveModel()`：客户端发什么 model 就透传什么，缺省默认 `qwork-advanced`
+- 默认 `AVAILABLE_MODELS` 精简为 `qwork-advanced`（qwenwork）/ `dingtalk-auto`（wukong）
+- `tier` 统一硬编码为 `'custom'`
+
+**收益**：消除多模型假象，减少用户配置错误；插件注册信息与实际能力一致喵。
+
+**证据**：`src/config.ts` 第 66-67 行（默认值）、`src/pluginClient.ts` 第 100 行（`tier: 'custom'`）、`src/qwenwork/client.ts`（无 MODEL_ALIASES）

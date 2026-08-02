@@ -98,7 +98,7 @@ export class PluginClient {
     const models = settings.availableModels.map(id => ({
       model_id: id,
       display_name: isQwenwork() ? qwenDisplayName(id) : wukongDisplayName(id),
-      tier: id.includes('opus') ? 'opus' : 'custom',
+      tier: 'custom',
     }));
 
     const message = {

@@ -14,19 +14,10 @@ import { settings } from '../config';
 import { refreshDeviceToken } from './auth';
 import { buildSignMaterial, buildAuthHeaders } from './signer';
 
-/** qwenwork 应用层模型 → 展示名 */
+/** qwenwork 应用层模型 → 展示名（注册时给 xrl-router 展示用） */
 const DISPLAY_NAMES: Record<string, string> = {
   'qwork-advanced': 'glm-5.2',
 };
-
-/** 模型 id 映射（OpenAI 客户端常见名 → qwenwork 应用层档位） */
-const MODEL_ALIASES: Record<string, string> = {
-  'glm-5.2': 'qwork-advanced',
-};
-
-export function resolveModel(model: string): string {
-  return MODEL_ALIASES[model] || model;
-}
 
 export function displayName(modelId: string): string {
   return DISPLAY_NAMES[modelId] || modelId;
@@ -77,7 +68,7 @@ export async function forwardChatCompletions(
   res: any,
   authHeader?: string,
 ): Promise<void> {
-  const model = resolveModel(body.model || 'qwork-advanced');
+  const model = body.model || 'qwork-advanced';
   const isStream = body.stream === true;
 
   // token 来源：只认 xrl-router 透传的 refresh token（密钥池）
@@ -152,13 +143,45 @@ export async function forwardChatCompletions(
     if (typeof (res as any).flush === 'function') (res as any).flush();
   };
 
+  // tool_calls 分片标准化（适配 xrl-router 的转换逻辑）：
+  // xrl-router 把「该 index 的首个 chunk」解析进 content_block_start 的 input（其余分片发 input_json_delta）。
+  // 因此：首 chunk 必须发空 arguments（避免 "{" 被消耗），所有 arguments 片段（含首 chunk 的）原样发出，
+  // 保证 partial_json 序列以 "{" 开头、拼接后是完整 JSON。
+  const seenToolCallIndex = new Set<number>();
+
   const flushLine = (line: string): void => {
     const t = line.trim();
     if (!t.startsWith('data:')) return;
     try {
       const outer = JSON.parse(t.slice(5));
       const inner = typeof outer.body === 'string' ? outer.body : JSON.stringify(outer.body ?? {});
-      emitChunk(inner);
+      const raw = JSON.parse(inner);
+      const choice = raw.choices?.[0];
+      const delta = choice?.delta;
+
+      if (delta?.tool_calls) {
+        const out: any[] = [];
+        for (const tc of delta.tool_calls) {
+          const i = tc.index ?? 0;
+          if (!seenToolCallIndex.has(i)) {
+            seenToolCallIndex.add(i);
+            // 首 chunk：只带 id/type/name，arguments 置空（触发 content_block_start）
+            out.push({
+              id: tc.id || '',
+              type: tc.type || 'function',
+              index: i,
+              function: { name: tc.function?.name || '', arguments: '' },
+            });
+          }
+          // arguments 片段原样发出（含首 chunk 的 "{"），作为 input_json_delta 续片
+          if (tc.function?.arguments) {
+            out.push({ index: i, function: { arguments: tc.function.arguments } });
+          }
+        }
+        emitChunk(JSON.stringify({ ...raw, choices: [{ ...choice, delta: { tool_calls: out } }] }));
+      } else {
+        emitChunk(inner);
+      }
     } catch { /* 忽略无法解析的行 */ }
   };
 
@@ -167,39 +190,73 @@ export async function forwardChatCompletions(
     const parts: any[] = [];
     const usage: any = {};
     let innerId = '';
+    let finishReason = 'stop';
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, { stream: true });
+        const chunk = decoder.decode(value, { stream: true });
+        buf += chunk;
         let idx;
         while ((idx = buf.indexOf('\n')) >= 0) {
           const t = buf.slice(0, idx).trim();
           buf = buf.slice(idx + 1);
           if (t.startsWith('data:')) {
+            const payload = t.slice(5);
+            if (payload === '[DONE]' || payload === '{}') continue;
             try {
-              const outer = JSON.parse(t.slice(5));
+              const outer = JSON.parse(payload);
               const inner = JSON.parse(outer.body);
               if (inner.id) innerId = inner.id;
-              if (inner.choices?.[0]?.delta) parts.push(inner.choices[0].delta);
+              if (inner.choices?.[0]) {
+                const choice = inner.choices[0];
+                if (choice.delta) parts.push(choice.delta);
+                if (choice.finish_reason) finishReason = choice.finish_reason;
+              }
               if (inner.usage) Object.assign(usage, inner.usage);
-            } catch { /* 跳过 */ }
+            } catch { /* 跳过无法解析的行 */ }
           }
         }
       }
-      // 合并 delta：content/reasoning_content/tool_calls 拼接
-      const msg: any = { role: 'assistant', content: '', reasoning_content: '' };
+      // 合并 delta：content/reasoning_content 拼接，tool_calls 按 index 合并
+      const content = parts.map(d => d.content).filter(Boolean).join('');
+      const reasoning = parts.map(d => d.reasoning_content).filter(Boolean).join('');
+
+      // tool_calls：按 index 分组，拼接 arguments，保留首个 chunk 的 id/name/type
+      const toolCallMap = new Map<number, any>();
       for (const d of parts) {
-        if (typeof d.content === 'string') msg.content += d.content;
-        if (typeof d.reasoning_content === 'string') msg.reasoning_content += d.reasoning_content;
-        if (d.tool_calls) msg.tool_calls = d.tool_calls;
+        if (!d.tool_calls) continue;
+        for (const tc of d.tool_calls) {
+          const i = tc.index ?? 0;
+          if (!toolCallMap.has(i)) {
+            toolCallMap.set(i, {
+              id: tc.id || '',
+              type: tc.type || 'function',
+              index: i,
+              function: { name: tc.function?.name || '', arguments: '' },
+            });
+          }
+          const merged = toolCallMap.get(i);
+          if (tc.id) merged.id = tc.id;
+          if (tc.type) merged.type = tc.type;
+          if (tc.function?.name) merged.function.name = tc.function.name;
+          if (tc.function?.arguments) merged.function.arguments += tc.function.arguments;
+        }
       }
+
+      const msg: any = { role: 'assistant' };
+      if (content) msg.content = content;
+      if (reasoning) msg.reasoning_content = reasoning;
+      if (toolCallMap.size > 0) {
+        msg.tool_calls = [...toolCallMap.values()].sort((a, b) => a.index - b.index);
+      }
+
       res.json({
         id: innerId || `chatcmpl-${randomUUID()}`,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: model,
-        choices: [{ index: 0, message: msg, finish_reason: 'stop' }],
+        choices: [{ index: 0, message: msg, finish_reason: finishReason }],
         usage: Object.keys(usage).length ? usage : undefined,
       });
     } catch (e: any) {

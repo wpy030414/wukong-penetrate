@@ -53,7 +53,7 @@ src/
 ├── config.ts             # 配置单例：env 读取 + wukong 版本动态检测
 ├── pluginClient.ts       # WebSocket 客户端：注册 / 心跳 / env 轮询 / 重连
 ├── qwenwork/
-│   ├── client.ts         # qwenwork 通道转发：签名 + SSE 解包 + 模型别名
+│   ├── client.ts         # qwenwork 通道转发：签名 + SSE 解包 + tool_calls 标准化
 │   ├── auth.ts           # token 管理：Keychain 解密 / refresh / 三源 fallback
 │   └── signer.ts         # 请求签名：AES-128-CBC + RSA_PKCS1 + MD5
 └── wukong/
@@ -130,8 +130,7 @@ export const isQwenwork = (): boolean => CHANNEL === 'qwenwork';
     "api_path": "/v1/chat/completions"
   },
   "models": [
-    { "model_id": "qwork-advanced", "display_name": "glm-5.2", "tier": "custom" },
-    { "model_id": "claude-opus-4-8", "display_name": "claude-opus-4-8", "tier": "opus" }
+    { "model_id": "qwork-advanced", "display_name": "glm-5.2", "tier": "custom" }
   ],
   "keys": ["ory_rt_xxx"]
 }
@@ -180,11 +179,14 @@ Authorization: Bearer ory_rt_xxx
 
 **静态头**：12 个固定值（`Cosy-Business-Product: qoder_work`, `Cosy-Scene: qwork`, `Cosy-Version: 1.0.47` 等；其中 `Login-Version`、`x-model-source` 非 `Cosy-*` 前缀）。
 
-**模型别名**：
-- 请求方向：`glm-5.2` → `qwork-advanced`（qwenwork 应用层档位）
-- 展示方向：`qwork-advanced` → `glm-5.2`（注册给 xrl-router 的 display_name）
+**展示名映射**：`qwork-advanced` → `glm-5.2`（注册给 xrl-router 的 display_name）。请求方向无别名映射——客户端发送什么 `model` 就透传什么，缺省时默认 `qwork-advanced`。
 
-**非流式聚合**：读取所有 SSE chunk，拼接 `choices[0].delta` 的 `content` / `reasoning_content` / `tool_calls`，组装为标准 `chat.completion` 对象返回。
+**流式 tool_calls 标准化**（适配 xrl-router 的转换逻辑）：
+- xrl-router 把「某 index 的首个 chunk」解析为 `content_block_start`（input 字段），其余分片作为 `input_json_delta` 处理
+- 因此首 chunk 必须发空 `arguments`（避免 `"{"` 被提前消耗），所有 arguments 片段（含首 chunk 的 `"{"`）原样发出，保证 `partial_json` 序列以 `"{"` 开头、拼接后是完整 JSON
+- 用 `seenToolCallIndex` 集合跟踪每个 index 的首 chunk
+
+**非流式聚合**：读取所有 SSE chunk，拼接 `choices[0].delta` 的 `content` / `reasoning_content`（空值时字段不存在），`tool_calls` 按 `index` 分组拼接 `arguments`。`finish_reason` 从上游最后一个 chunk 透传（默认 `stop`）。
 
 ### 3.5 qwenwork/auth.ts — token 管理
 
@@ -387,9 +389,7 @@ data: {"id":"chatcmpl-xxx","choices":[{"delta":{"content":"..."}}]}
     "api_path": "/v1/chat/completions"
   },
   "models": [
-    { "model_id": "dingtalk-auto", "display_name": "qwen3.7-plus", "tier": "custom" },
-    { "model_id": "claude-opus-4-8", "display_name": "claude-opus-4-8", "tier": "opus" },
-    { "model_id": "gpt-4o", "display_name": "gpt-4o", "tier": "custom" }
+    { "model_id": "dingtalk-auto", "display_name": "qwen3.7-plus", "tier": "custom" }
   ],
   "keys": ["sk-xxx", "sk-yyy"]
 }
