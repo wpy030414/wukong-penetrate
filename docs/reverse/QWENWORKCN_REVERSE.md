@@ -465,19 +465,21 @@ POST https://gateway.qwenwork.cn/api/v1/deviceToken/refresh
 | 后端模型 | 通义千问/Claude/GPT（DEAP 多模型）| **智谱 glm-5.2**（maas-glm）|
 | 网关 | `api-deap.dingtalk.com` | `gateway.qwenwork.cn`（动态发现）|
 | 密钥 | 静态 `sk-`（29 天）| 动态 `COSY.JWT`（短期刷新）|
-| 请求签名 | 无 | `cosy-key`（wasm 白盒）+ `x-sign`（SecurityGuard）|
-| 请求体 | 明文 JSON | `Encode=1` 加密 + base91 |
-| 设备风控 | 无 | `umid_token` + `x_mini_wua`（阿里 SecurityGuard）|
-| 独立复用难度 | 低（提取 sk- 即可）| **高**（双层签名 + wasm + 反调试）|
+| 请求签名 | 无 | ~~`cosy-key`(wasm 白盒) + `x-sign`(SecurityGuard)~~ **已破解**：RSA_PKCS1(asar 公钥) + MD5 签名（见 §6.8）|
+| 请求体 | 明文 JSON | ~~`Encode=1` 加密~~ **明文 JSON 即可**（网关接受，见 §6.8）|
+| 设备风控 | 无 | `umid_token` + `x_mini_wua`（阿里 SecurityGuard，账户层；推理层不校验）|
+| 独立复用难度 | 低（提取 sk- 即可）| ~~高~~ **已实现完全离线独立调用**（见 §6.8）|
 | 抓包代理 | 认系统代理 | 认 `proxy.mode=manual` 设置（默认直连）|
 
 ---
 
-## 9. 已知边界
+## 9. 已知边界（已更新）
 
-- `cosy-key` 未破 → 推理请求无法脱离千问办公独立复用
-- COSY JWT 动态短期 → 即便破 cosy-key，仍需解 `auth.dat`(safeStorage) 拿 PAT 走刷新链
-- `qoderclicn` wasm 含完整签名逻辑，但 wasm + 白盒 + 反调试，反汇编成本高
+- ~~`cosy-key` 未破~~ → **已破解**（§6.8）：`cosy-key` = `base64(RSA_PKCS1(asar 硬编码公钥, random 16B AES key))`，完全离线独立生成
+- ~~推理请求无法脱离千问办公独立复用~~ → **已实现完全离线独立调用**（§6.8 验证 HTTP 200 + glm-5.2 推理成功）
+- COSY JWT 动态短期 → access token ~1h 有效，但已通过 `deviceToken/refresh` + safeStorage 解密实现自动刷新链（§6.9）
+- `qoderclicn` wasm 签名逻辑**已被纯 Node.js 实现替代**（`src/qwenwork/signer.ts`），无需调用 wasm
+- 账户层 `x-sign`/`x-umt`/`x-mini-wua`（SecurityGuard）：推理层**不校验**这些头，仅 Cosy 签名即可通过网关鉴权
 
 ---
 
@@ -486,4 +488,5 @@ POST https://gateway.qwenwork.cn/api/v1/deviceToken/refresh
 - asar 解包：`npx @electron/asar extract app.asar /tmp/qwen_asar`
 - 静态搜索辅助：`/tmp/g.py`（minified 大文件正则上下文）
 - 原始抓包脚本：`/tmp/cap_qoder.py`（mitmproxy addon，已焚含密钥日志）
-- 本项目悟空侧：[README.md](./README.md) / [PRD.md](./PRD.md) / [TSD.md](./TSD.md)
+- 本项目悟空侧：[WUKONG_REVERSE.md](./WUKONG_REVERSE.md)
+- 架构文档：[../ARCHITECTURE.md](../ARCHITECTURE.md)
