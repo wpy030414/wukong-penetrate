@@ -1,10 +1,12 @@
 {
   "version": "0.1.0",
-  "name": "xrl-router-plugin-wukong",
-  "description": "xrl-router 插件：钉钉 DEAP 协议桥接 — 纯无状态翻译层，注入 DEAP 业务头并透传密钥",
+  "name": "xrl-router-plugin-qwenwork",
+  "description": "xrl-router 双通道插件：qwenwork（千问办公→智谱GLM）与 wukong（钉钉悟空→DEAP），包装为 OpenAI 兼容本地服务",
   "scripts": {
-    "capture-key": "tsx scripts/capture-key.ts",
-    "serve": "tsx watch src/index.ts"
+    "capture-key": "tsx scripts/qwenwork/capture-key.ts",
+    "serve": "tsx watch src/index.ts",
+    "capture-key:wukong": "tsx scripts/wukong/capture-key.ts",
+    "serve:wukong": "tsx watch src/index.ts --use wukong"
   },
   "dependencies": {
     "cors": "^2.8.5",

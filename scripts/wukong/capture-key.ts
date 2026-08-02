@@ -37,10 +37,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { settings } from '../src/config';
+import { settings } from '../../src/config';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, '..');
+const REPO_ROOT = path.resolve(__dirname, '../..');
 const CAP_SCRIPT = path.join(__dirname, 'cap_deap.py');
 
 /** 平台检测 */
@@ -57,7 +57,7 @@ const ENV_PATH = path.join(REPO_ROOT, '.env');
 const WAIT_MS = 45000;
 const NET_SERVICE = process.env.CAPTURE_NET_SERVICE || 'Wi-Fi'; // 主用网络接口名（macOS 用）
 
-const DEAP_BASE_URL = settings.baseUrl;
+const DEAP_BASE_URL = settings.deapBaseUrl;
 
 /** deap 业务头：直接复用 src/config.ts 的 settings，消除重复定义 */
 const DEAP_HEADERS: Record<string, string> = {
@@ -630,30 +630,30 @@ async function extractKey(): Promise<string | null> {
   return null;
 }
 
-// —— 写 .env（操作 CAPTURED_KEYS 行，追加 / 新增，不碰其他变量）——
+// —— 写 .env（操作 WUKONG_KEYS 行，追加 / 新增，不碰其他变量）——
 function writeEnv(key: string): boolean {
-  step('写入 CAPTURED_KEYS 到 .env');
+  step('写入 WUKONG_KEYS 到 .env');
   if (sh(`cd "${REPO_ROOT}" && git check-ignore .env`).code !== 0) {
     fail('.env 未被 git 忽略！为防止泄露已中止。请先把 .env 加入 .gitignore');
     return false;
   }
   const lines = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, 'utf8').split('\n') : [];
 
-  const keysIdx = lines.findIndex((l) => l.startsWith('CAPTURED_KEYS='));
+  const keysIdx = lines.findIndex((l) => l.startsWith('WUKONG_KEYS='));
 
   if (keysIdx >= 0) {
-    const raw = lines[keysIdx].slice('CAPTURED_KEYS='.length).trim();
+    const raw = lines[keysIdx].slice('WUKONG_KEYS='.length).trim();
     const existing = raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : [];
     if (existing.includes(key)) {
-      ok(`密钥已存在于 CAPTURED_KEYS 池中（${mask(key)}），无需重复添加`);
+      ok(`密钥已存在于 WUKONG_KEYS 池中（${mask(key)}），无需重复添加`);
       return true;
     }
     existing.push(key);
-    lines[keysIdx] = `CAPTURED_KEYS=${existing.join(',')}`;
+    lines[keysIdx] = `WUKONG_KEYS=${existing.join(',')}`;
     console.log(`   已追加密钥 ${mask(key)}，池中共 ${existing.length} 个密钥`);
   } else {
-    lines.push(`CAPTURED_KEYS=${key}`);
-    console.log(`   已新增 CAPTURED_KEYS=${mask(key)}`);
+    lines.push(`WUKONG_KEYS=${key}`);
+    console.log(`   已新增 WUKONG_KEYS=${mask(key)}`);
   }
 
   const content = lines.filter((l, i) => !(l === '' && i === lines.length - 1)).join('\n').replace(/\n{3,}/g, '\n\n');
@@ -794,7 +794,7 @@ function cleanup(success: boolean): void {
     if (!(await validateKey(key))) { process.exitCode = 1; return; }
     if (!writeEnv(key)) { process.exitCode = 1; return; }
 
-    console.log(`\n🎉 完成！抓到 key ${mask(key)} 并已写入 CAPTURED_KEYS。`);
+    console.log(`\n🎉 完成！抓到 key ${mask(key)} 并已写入 WUKONG_KEYS。`);
     console.log('   重启代理后生效：lsof -ti :19067 | xargs kill -9; pnpm serve\n');
     success = true;
   } finally {

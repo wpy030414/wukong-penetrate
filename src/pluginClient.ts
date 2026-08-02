@@ -13,12 +13,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import { settings } from './config';
+import { isQwenwork, PLUGIN_ID } from './channel';
+import { displayName as qwenDisplayName } from './qwenwork/client';
+import { displayName as wukongDisplayName } from './wukong/client';
 
-const PLUGIN_ID = 'xrl-router-plugin-wukong';
 const ENV_POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 60000;
+
+/** 密钥池环境变量键（qwenwork 用 QWEN_KEYS，wukong 用 WUKONG_KEYS） */
+const KEYS_ENV_KEY = isQwenwork() ? 'QWEN_KEYS' : 'WUKONG_KEYS';
 
 export class PluginClient {
   private ws: WebSocket | null = null;
@@ -44,7 +49,7 @@ export class PluginClient {
       if (fs.existsSync(envPath)) {
         const envContent = fs.readFileSync(envPath, 'utf-8');
         const parsed = dotenv.parse(envContent);
-        const keysStr = parsed.CAPTURED_KEYS || '';
+        const keysStr = parsed[KEYS_ENV_KEY] || '';
         this.lastKeys = keysStr
           .split(',')
           .map(s => s.trim())
@@ -90,18 +95,11 @@ export class PluginClient {
    * 发送注册消息
    */
   private sendRegister(): void {
-    const models = settings.availableModels.map(id => {
-      const displayNames: Record<string, string> = {
-        'dingtalk-auto': 'qwen3.7-plus',
-        'claude-opus-4-8': 'claude-opus-4-8',
-        'gpt-4o': 'gpt-4o',
-      };
-      return {
-        model_id: id,
-        display_name: displayNames[id] || id,
-        tier: id.includes('opus') ? 'opus' : 'custom',
-      };
-    });
+    const models = settings.availableModels.map(id => ({
+      model_id: id,
+      display_name: isQwenwork() ? qwenDisplayName(id) : wukongDisplayName(id),
+      tier: id.includes('opus') ? 'opus' : 'custom',
+    }));
 
     const message = {
       type: 'register',
@@ -192,7 +190,7 @@ export class PluginClient {
 
       const envContent = fs.readFileSync(envPath, 'utf-8');
       const parsed = dotenv.parse(envContent);
-      const keysStr = parsed.CAPTURED_KEYS || '';
+      const keysStr = parsed[KEYS_ENV_KEY] || '';
       const currentKeys = keysStr
         .split(',')
         .map(s => s.trim())

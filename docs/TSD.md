@@ -150,7 +150,7 @@ export class PluginClient {
 
 #### 3.2.3 密钥推送
 
-每 5s 轮询 `.env`，检测 `CAPTURED_KEYS` 变化后推送：
+每 5s 轮询 `.env`，检测 `WUKONG_KEYS` 变化后推送：
 
 ```json
 { "type": "keys_update", "keys": ["sk-xxxx", "sk-yyyy", ...] }
@@ -440,7 +440,7 @@ pnpm serve
 |------|------|----------|
 | 服务状态 | 是否运行 | `curl http://localhost:19067/health` |
 | WebSocket 连接 | 是否连接 xrl-router | 查看日志 `[PluginClient] Connected to xrl-router` |
-| 密钥池 | 当前密钥数量 | 查看 `.env` 中 `CAPTURED_KEYS` |
+| 密钥池 | 当前密钥数量 | 查看 `.env` 中 `WUKONG_KEYS` |
 
 ---
 

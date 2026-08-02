@@ -61,7 +61,7 @@ xrl-router 是一个统一的 LLM 路由层，负责密钥管理、请求分发�
 **以便** xrl-router 能自动轮转，避免单密钥配额耗尽喵～
 
 **验收标准：**
-- `.env` 中 `CAPTURED_KEYS` 支持逗号分隔多个密钥
+- `.env` 中 `WUKONG_KEYS` 支持逗号分隔多个密钥
 - 插件每 5s 轮询 `.env`，检测变化后推送给 xrl-router
 - xrl-router 在请求时自动轮转密钥
 
@@ -98,7 +98,7 @@ xrl-router 是一个统一的 LLM 路由层，负责密钥管理、请求分发�
 | F-1 | DEAP 协议桥接 | P0 | 接收 OpenAI Chat Completions 请求，注入 DEAP 业务头，转发到 DEAP 网关 |
 | F-2 | 流式支持 | P0 | 支持 `stream: true`，透传 SSE 字节流 |
 | F-3 | 非流式支持 | P0 | 支持非流式请求，透传 JSON 响应 |
-| F-4 | 密钥池推送 | P0 | 轮询 `.env`，检测 `CAPTURED_KEYS` 变化后推送给 xrl-router |
+| F-4 | 密钥池推送 | P0 | 轮询 `.env`，检测 `WUKONG_KEYS` 变化后推送给 xrl-router |
 | F-5 | WebSocket 注册 | P0 | 启动时连接 xrl-router 并注册为插件，推送模型列表和密钥池 |
 | F-6 | 心跳保活 | P1 | 每 30s 发送心跳，保持连接 |
 | F-7 | 断线重连 | P1 | 指数退避重连（基础 1s，最大 60s） |
@@ -186,7 +186,7 @@ xrl-router 是一个统一的 LLM 路由层，负责密钥管理、请求分发�
 
 - [ ] 插件能成功连接 xrl-router 并注册
 - [ ] 客户端通过 xrl-router 能正常调用 DEAP 模型（流式 + 非流式）
-- [ ] `.env` 中 `CAPTURED_KEYS` 变化后，插件能自动推送给 xrl-router
+- [ ] `.env` 中 `WUKONG_KEYS` 变化后，插件能自动推送给 xrl-router
 - [ ] `pnpm capture-key` 能跨平台抓取密钥（macOS + Windows）
 - [ ] 断线后能自动重连并重新注册
 - [ ] 健康检查端点正常返回
@@ -202,7 +202,7 @@ xrl-router 是一个统一的 LLM 路由层，负责密钥管理、请求分发�
 | DEAP | 钉钉大模型网关（DingTalk Enterprise AI Platform） |
 | xrl-router | 统一的 LLM 路由层，负责密钥管理和请求分发 |
 | daemon | 钉钉悟空后台服务（`DingTalkReal`），负责调用 DEAP 网关 |
-| 密钥池 | `.env` 中 `CAPTURED_KEYS` 配置的多个密钥列表 |
+| 密钥池 | `.env` 中 `WUKONG_KEYS` 配置的多个密钥列表 |
 
 ### 10.2 参考资料
 
