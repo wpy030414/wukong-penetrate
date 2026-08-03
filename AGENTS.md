@@ -94,7 +94,7 @@ pnpm capture-key:wukong   # wukong 密钥抓取
 | 密钥过期（~29天 wukong / ~1h qwenwork access token） | 网关设计，重跑 capture-key / 自动刷新即可 |
 | 第三方模型偶发 550 | DEAP 动态渠道池问题，xrl-router 自动重试 |
 | 无测试 | 当前阶段不需要，插件是纯翻译层 |
-| qwenwork 仅 macOS | Windows safeStorage 走 DPAPI，逆向成本高，暂不支持 |
+| qwenwork Windows 解密依赖 powershell.exe | Windows DPAPI 经 PowerShell `System.Security` 调用，Windows 自带无需安装；macOS 走 Keychain |
 
 ## 密钥安全边界
 

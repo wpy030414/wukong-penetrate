@@ -54,17 +54,13 @@ export async function main(): Promise<void> {
   console.log(`🔑 xrl-router-plugin · qwenwork 通道 token 验证（无需抓包，纯本机解密+刷新）\n`);
 
   // 1. 前置检查
-  if (process.platform !== 'darwin') {
-    fail('qwenwork 通道目前仅支持 macOS（safeStorage 走 Keychain；Windows 走 DPAPI 待实现）');
-    return;
-  }
   if (!fs.existsSync(settings.qwenOauthTokenPath)) {
     fail(`未找到 ${settings.qwenOauthTokenPath}`);
     console.error('   请先在千问办公 App 登录（生成 auth-v2.dat），再重跑。');
     return;
   }
 
-  // 2. 解密 auth-v2.dat（首次会弹 Keychain 授权，点「允许」）
+  // 2. 解密 auth-v2.dat（macOS 弹 Keychain 授权；Windows 走 DPAPI，无弹窗）
   console.log(`▶ 解密 ${settings.qwenOauthTokenPath}（若弹钥匙串授权请点「允许」）…`);
   let state;
   try {

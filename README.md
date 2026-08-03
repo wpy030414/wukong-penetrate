@@ -25,7 +25,7 @@
 | **pnpm** | 包管理器（不要用 npm） |
 | **xrl-router** | 必须运行在 `http://localhost:19068` |
 | **mitmproxy** | 仅 wukong 抓密钥时需要 |
-| **千问办公 / 悟空 App** | 仅首次抓密钥/token 时需要 |
+| **千问办公 / 悟空 App** | 仅首次抓密钥/token 时需要（macOS Keychain / Windows DPAPI 解密 `auth-v2.dat`） |
 
 ## 快速开始
 

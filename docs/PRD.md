@@ -32,7 +32,7 @@
 | 密钥有效期 | ~29 天，过期需重抓 | 自动刷新，无感知轮换 |
 | 运行时依赖 | 需要 daemon 运行才能抓密钥 | 完全离线独立调用（逆向成果） |
 | 签名复杂度 | 注入业务头即可 | RSA+AES+MD5 Cosy 签名 |
-| 平台支持 | macOS + Windows | 仅 macOS（Keychain 解密 safeStorage） |
+| 平台支持 | macOS + Windows | macOS（Keychain）+ Windows（DPAPI） |
 
 两个通道共享 Express 骨架、xrl-router 集成、OpenAI 协议入口，代码复用率高喵～
 
@@ -129,7 +129,7 @@
 **验收标准：**
 - access token 临近过期（提前 5 分钟）时自动调用 `deviceToken/refresh` 刷新
 - refresh token 刷新后自动同步到 `.env` 的 `QWEN_KEYS`（密钥池闭环）
-- 三源回退：内存缓存 → `auth-v2.dat`（Keychain 解密）→ `.env QWEN_KEYS`（自举）
+- 三源回退：内存缓存 → `auth-v2.dat`（macOS Keychain / Windows DPAPI 解密）→ `.env QWEN_KEYS`（自举）
 - 单飞防并发（同一时刻只有一个刷新请求）
 
 ### US-7：离线独立调用验证（qwenwork）
@@ -139,7 +139,7 @@
 **以便** 确认离线独立调用的可行性喵～
 
 **验收标准：**
-- 解密 `auth-v2.dat`（Keychain → PBKDF2(1003, saltysalt) → AES-128-CBC(IV=0x20)）
+- 解密 `auth-v2.dat`（macOS Keychain → PBKDF2(1003, saltysalt) → AES-128-CBC(IV=0x20)；Windows Local State DPAPI 密钥 → AES-256-GCM）
 - 强制刷新 token（验证刷新链 + refresh token 轮换）
 - 备份新 refresh token 到 `.env QWEN_KEYS`（mode 600）
 - 全程不依赖千问办公 App 运行（仅需 `auth-v2.dat` 文件存在）
@@ -201,7 +201,7 @@
 ### 5.4 兼容性
 
 - Node.js >= 20
-- 跨平台：macOS（主要）+ Windows（wukong 通道；qwenwork 通道仅 macOS，依赖 Keychain）
+- 跨平台：macOS（主要）+ Windows（wukong 通道；qwenwork 通道 macOS Keychain / Windows DPAPI）
 - 协议兼容：OpenAI Chat Completions API（流式 + 非流式）
 
 ---
@@ -213,7 +213,7 @@
 - 本插件不管理密钥轮转逻辑（由 xrl-router 负责）
 - 本插件不运行任何本地模型（全部能力来自远端网关）
 - DEAP 网关流式请求不能带 `Accept: text/event-stream` 头（会 406）
-- qwenwork 通道 token 解密仅支持 macOS（safeStorage 走 Keychain；Windows 走 DPAPI 暂未实现）
+- qwenwork 通道 token 解密支持 macOS（Keychain）与 Windows（Local State DPAPI 密钥 → AES-256-GCM）；AES key 绑定当前 Windows 用户，auth-v2.dat + Local State 不可跨机器/账户解密
 
 ### 6.2 依赖
 
@@ -236,10 +236,11 @@
 | xrl-router 断线 | 插件无法注册 | 自动重连（指数退避 1s~60s）+ 心跳保活 30s |
 | DEAP 网关返回 406 | wukong 流式请求失败 | 不设 `Accept: text/event-stream` 头（代码注释强调） |
 | 系统代理未还原 | 全局流量走 mitmdump | `finally` 块保证还原 + 逐项校验 server:port |
-| OAuth token 刷新失败 | qwenwork 通道不可用 | 三源回退：内存缓存 → `auth-v2.dat`（Keychain 解密）→ `.env QWEN_KEYS`（自举） |
+| OAuth token 刷新失败 | qwenwork 通道不可用 | 三源回退：内存缓存 → `auth-v2.dat`（macOS Keychain / Windows DPAPI 解密）→ `.env QWEN_KEYS`（自举） |
 | Clash/Surge 抢占系统代理 | 抓密钥失败 | preflight 检测 + 提示关闭 System Proxy 开关 |
 | daemon 未就绪 | 抓不到 DEAP key | preflight 检测 `service status` + 自动尝试拉起 + Windows named pipe 兜底检测 |
-| Keychain 授权拒绝 | qwenwork token 解密失败 | 脚本提示用户点「允许」，首次会弹 Keychain 授权对话框 |
+| Keychain 授权拒绝（macOS） | qwenwork token 解密失败 | 脚本提示用户点「允许」，首次会弹 Keychain 授权对话框 |
+| Windows DPAPI 解密失败 | qwenwork token 解密失败 | 检查 auth-v2.dat 是否来自同一 Windows 用户（DPAPI 绑定用户） |
 
 ---
 

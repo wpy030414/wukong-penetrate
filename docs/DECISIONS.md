@@ -125,23 +125,7 @@
 
 ---
 
-## D-9: 为什么 qwenwork 通道仅支持 macOS？
-
-**背景**：`capture-key` 脚本需要解密千问办公 App 使用 Electron `safeStorage` 加密的凭据喵～
-
-**决策**：`capture-key` 仅在 macOS 上运行。
-
-**原因**：`safeStorage` 的加密实现因平台而异：
-- **macOS**：Keychain + PBKDF2 + AES-128-CBC
-- **Windows**：DPAPI（需要单独逆向）
-
-每个平台的解密逻辑完全不同，当前仅完成了 macOS 的逆向。密钥池引导（`QWEN_KEYS` 直接写入 `.env`）在任意平台均可工作，不受此限制喵。
-
-**证据**：`scripts/qwenwork/capture-key.ts` 第 57 行（平台检查）喵～
-
----
-
-## D-10: 为什么移除模型别名映射并精简默认模型列表？
+## D-9: 为什么移除模型别名映射并精简默认模型列表？
 
 **背景**：早期 `qwenwork/client.ts` 维护了 `MODEL_ALIASES`（`glm-5.2` → `qwork-advanced`）和 `resolveModel()`，`config.ts` 的默认 `AVAILABLE_MODELS` 包含 `claude-opus-4-8,gpt-4o`，注册消息中按 model_id 含 `opus` 判断 `tier`。
 

@@ -25,15 +25,28 @@
 3. **auth-v2.dat 文件**：safeStorage 解密（macOS Keychain）→ 直接返回解密结果
 4. **.env QWEN_KEYS**：`loadRefreshTokenFromEnv()` → `refreshDeviceToken()` 自举刷新
 
-### safeStorage 解密（`decryptAuthFile`）
+### safeStorage 解密（`decryptAuthFile`，按平台分派）
 
+**通用**：文件头检查——前 3 字节必须是 `v10`，否则报错（自动剥离 UTF-8 BOM 容错）喵。
+
+**macOS（Keychain）**：
 1. **Keychain 取密码**：`security find-generic-password -s "QwenWorkCN Safe Storage" -a "QwenWorkCN Key" -w`
    - 输出末尾换行需去掉（`.replace(/\n$/, '')`）
 2. **PBKDF2 派生 AES key**：`pbkdf2Sync(pw, "saltysalt", 1003, 16, "sha1")`
 3. **IV**：`Buffer.alloc(16, 0x20)` — 16 个空格字符（0x20）
-4. **文件头检查**：前 3 字节必须是 `v10`，否则报错
-5. **AES-128-CBC 解密**：跳过前 3 字节（v10 头），解密剩余内容
-6. **JSON 解析**：必须含 `token`（string）和 `refreshToken`（string）
+4. **AES-128-CBC 解密**：跳过前 3 字节（v10 头），解密剩余内容
+5. **JSON 解析**：必须含 `token`（string）和 `refreshToken`（string）
+
+**Windows（AES-256-GCM，Electron ≥ 37 的 os_crypt 格式）**：
+1. **取 AES key**：`getWindowsAesKey()` — 读 `{userDataDir}/Local State` 的 `os_crypt.encrypted_key`
+   - base64 解码 → 去掉 `DPAPI` 前缀（5 字节）→ DPAPI blob
+   - `dpapiUnprotect()`：PowerShell `System.Security` 的 `ProtectedData.Unprotect`（**entropy=NULL**，CurrentUser）
+   - 输出 32 字节 AES key
+2. **解 auth-v2.dat**：v10 头后 = `12B nonce + 密文 + 16B tag`
+   - `aes-256-gcm`，`setAuthTag(tag)` → 解出明文 JSON
+3. **JSON 解析**：同 macOS，必须含 `token` + `refreshToken`
+
+> 反向前提：`encrypted_key` 以 `"DPAPI\0"` 开头（非 App-Bound 的 `APPB` 格式）。若未来 Electron 升级启用 App-Bound Encryption（Chromium 127+），需额外处理 app-bound key——见 DECISIONS 的已知边界。
 
 ### deviceToken/refresh API
 
@@ -61,7 +74,8 @@
 
 ## 验收标准
 
-- [ ] 首次调用 `getToken()`，auth-v2.dat 存在 → 解密返回
+- [ ] 首次调用 `getToken()`，auth-v2.dat 存在（macOS）→ Keychain 解密返回
+- [ ] 首次调用 `getToken()`，auth-v2.dat 存在（Windows）→ DPAPI 解密返回
 - [ ] 首次调用 `getToken()`，auth-v2.dat 不存在，QWEN_KEYS 有值 → 自举刷新返回
 - [ ] access token 临近过期（< 5min 缓冲）→ 自动用 refresh token 刷新
 - [ ] 并发调用 `getToken()` → 只触发一次网络刷新（单飞）
@@ -71,8 +85,11 @@
 
 ## 已知边界
 
-- **仅 macOS**：safeStorage 依赖 Keychain，Windows 走 DPAPI 暂未实现（auth.ts 会因 `security` 命令不存在而报错）
-- Keychain 首次访问会弹系统授权对话框，用户需点「允许」
+- **macOS**：safeStorage 依赖 Keychain，首次访问会弹系统授权对话框，用户需点「允许」
+- **Windows**：AES key 经 DPAPI 保护绑定当前 Windows 用户，auth-v2.dat + Local State 拷贝到其他机器/账户无法解密
+- **Windows**：解密经 PowerShell `System.Security`（Windows 自带），powershell.exe 不可用时无法解密
+- **Windows**：`encrypted_key` 需为 `DPAPI\0` 格式（App-Bound `APPB` 格式暂不支持）
+- **文件头**：必须是 `v10`；自动剥离 UTF-8 BOM 容错
 - `.env` 不存在时 `loadRefreshTokenFromEnv` 返回 null（不报错）
 - `syncEnvRefreshToken` 失败只 `console.warn`，不抛异常（不影响主流程）
 - `cached.user` 在自举刷新时为空 `{ uid: '' }`（.env 无用户信息），后续从 JWT 解出

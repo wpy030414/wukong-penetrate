@@ -50,9 +50,10 @@ function parseChannel(): Channel {
 | 环境变量 | 字段 | 默认值 |
 |---|---|---|
 | `QWEN_KEYS` | （auth.ts 读取） | — |
-| `QWEN_OAUTH_TOKEN_PATH` | `qwenOauthTokenPath` | `~/Library/Application Support/QwenWorkCN/auth-v2.dat` |
-| `QWEN_KEYCHAIN_SERVICE` | `qwenKeychainService` | `QwenWorkCN Safe Storage` |
-| `QWEN_KEYCHAIN_ACCOUNT` | `qwenKeychainAccount` | `QwenWorkCN Key` |
+| `QWEN_OAUTH_TOKEN_PATH` | `qwenOauthTokenPath` | Windows: `%APPDATA%/QwenWorkCN/auth-v2.dat`；macOS: `~/Library/Application Support/QwenWorkCN/auth-v2.dat` |
+| `QWEN_USER_DATA_DIR` | `qwenUserDataDir` | Windows: `%APPDATA%/QwenWorkCN`；macOS: `~/Library/Application Support/QwenWorkCN`（Windows 读 Local State 的 os_crypt 密钥） |
+| `QWEN_KEYCHAIN_SERVICE` | `qwenKeychainService` | `QwenWorkCN Safe Storage`（仅 macOS 使用） |
+| `QWEN_KEYCHAIN_ACCOUNT` | `qwenKeychainAccount` | `QwenWorkCN Key`（仅 macOS 使用） |
 | `QWEN_BASE_URL` | `qwenBaseUrl` | `https://gateway.qwenwork.cn` |
 | `QWEN_DEVICE_REFRESH_PATH` | `qwenDeviceRefreshPath` | `/api/v1/deviceToken/refresh` |
 | `QWEN_REFRESH_INTERVAL_MS` | `qwenRefreshIntervalMs` | `600000`（10min） |

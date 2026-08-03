@@ -54,7 +54,7 @@ src/
 ├── pluginClient.ts       # WebSocket 客户端：注册 / 心跳 / env 轮询 / 重连
 ├── qwenwork/
 │   ├── client.ts         # qwenwork 通道转发：签名 + SSE 解包 + tool_calls 标准化
-│   ├── auth.ts           # token 管理：Keychain 解密 / refresh / 三源 fallback
+│   ├── auth.ts           # token 管理：safeStorage 解密（Keychain/DPAPI）/ refresh / 三源 fallback
 │   └── signer.ts         # 请求签名：AES-128-CBC + RSA_PKCS1 + MD5
 └── wukong/
     └── client.ts         # wukong 通道转发：DEAP 头注入 + body 清洗 + 字节透传
@@ -190,22 +190,21 @@ Authorization: Bearer ory_rt_xxx
 
 ### 3.5 qwenwork/auth.ts — token 管理
 
-#### decryptAuthFile — safeStorage 解密
+#### decryptAuthFile — safeStorage 解密（按平台分派）
 
 ```
-Keychain ("QwenWorkCN Safe Storage" / "QwenWorkCN Key")
-    │
-    ▼ password (去尾换行)
-PBKDF2(password, "saltysalt", iterations=1003, keylen=16, sha1)
-    │
-    ▼ aesKey (16 bytes)
-AES-128-CBC(key=aesKey, iv=Buffer.alloc(16, 0x20))
-    │
+macOS（Keychain）                      Windows（DPAPI → AES-256-GCM）
+Keychain ("QwenWorkCN Safe Storage" /  Local State 的 os_crypt.encrypted_key
+ "QwenWorkCN Key")                     → base64 解码 → 去 "DPAPI\0" 前缀
+    ▼ password (去尾换行)                → CryptUnprotectData(entropy=NULL)
+PBKDF2(password, "saltysalt", 1003, 16, sha1)   ▼ 32B AES key
+    ▼ aesKey (16 bytes)                v10 头后 = 12B nonce + 密文 + 16B tag
+AES-128-CBC(key=aesKey, iv=0x20×16)    aes-256-gcm 解密
     ▼ 解密 auth-v2.dat (跳过 "v10" 3字节头)
 JSON → QwenTokenState { token, refreshToken, user, expiresAt, raw }
 ```
 
-仅 macOS（Keychain + safeStorage）。Windows 的 DPAPI 暂不支持。
+macOS（Keychain + PBKDF2 + AES-128-CBC）与 Windows（Local State 取 key → DPAPI 解包 → AES-256-GCM）均支持；按 `process.platform` 分派，Windows 依赖系统自带 powershell.exe（零新依赖）。
 
 #### refreshDeviceToken
 
@@ -216,7 +215,7 @@ JSON → QwenTokenState { token, refreshToken, user, expiresAt, raw }
 ```
   ① 内存缓存 (cached.refreshToken)
      │ 失败 ↓
-  ② auth-v2.dat (Keychain → PBKDF2 → AES)
+  ② auth-v2.dat (Keychain → PBKDF2 → AES / Windows: DPAPI key → AES-256-GCM)
      │ 失败 ↓
   ③ .env QWEN_KEYS (capture-key 备份的 refresh token)
      │ 失败 ↓
