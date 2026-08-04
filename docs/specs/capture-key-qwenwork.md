@@ -2,7 +2,9 @@
 
 ## 目标
 
-验证千问办公登录态有效性 + 刷新链完整性，并将新 refresh token 备份到 `.env` 的 `QWEN_KEYS` 喵～
+验证千问办公登录态有效性 + 刷新链完整性，并将新 refresh token 备份到 `.env` 的 `QWEN_KEYS`。
+
+**定位变更**：改造后 token 管理由 `serve` 自动完成（`getToken()` 缓存 + 文件监听自动拾取 + 双向同步），`capture-key` 退化为**诊断工具**，日常使用只需 `pnpm serve`（千问 App 后台运行即可）喵～
 
 ## 输入输出
 
@@ -27,10 +29,20 @@
 3. **强制刷新**：调用 `forceRefresh()` → `refreshDeviceToken(cached.refreshToken)`
    - 验证刷新链可用（refresh token 未过期）
    - 打印新 access token + 新 refresh token（已轮换）
+   - refresh 成功后自动写回 auth-v2.dat（双向同步）
 4. **备份到 .env**：`writeEnvRefreshToken(next.refreshToken)`
    - 前置：`git check-ignore .env` 必须通过
    - 替换或追加 `QWEN_KEYS=` 行
    - 文件 mode 600 + `chmodSync(0o600)`
+
+### 使用场景
+
+| 场景 | 是否需要 capture-key |
+|------|---------------------|
+| 首次部署 / 换机器 | 是（验证解密 + 刷新链能跑通） |
+| 日常使用 | 否（`pnpm serve` 自动管理） |
+| token 全挂做诊断 | 是（看哪一步断了） |
+| 千问 App 重新登录后 | 否（文件监听自动拾取） |
 
 ### 无网络拦截
 
@@ -58,6 +70,7 @@ execSync(`cd "${REPO_ROOT}" && git check-ignore .env`, { stdio: 'ignore' });
 - [ ] refresh token 已过期 → 刷新失败 → 报错「token 可能已失效」
 - [ ] .env 未被 git 忽略 → 中止，不写入
 - [ ] .env 写入后 mode 为 600
+- [ ] 刷新成功后 auth-v2.dat 已写回（双向同步）
 
 ## 已知边界
 
@@ -67,3 +80,26 @@ execSync(`cd "${REPO_ROOT}" && git check-ignore .env`, { stdio: 'ignore' });
 - `forceRefresh` 会轮换 refresh token — 旧的 ory_rt_ 立即失效，新值必须备份到 QWEN_KEYS
 - 如果 auth-v2.dat 被千问办公 App 重新登录覆盖，其中的 refresh token 也会变
 - `writeEnvRefreshToken` 会清理多余空行（`replace(/\n{3,}/g, '\n\n')`）
+
+## 与 serve 的协作
+
+改造后的完整 token 生命周期：
+
+```
+capture-key（首次/诊断）
+    │
+    ▼ 验证 + 备份 QWEN_KEYS
+    │
+    ▼
+  serve 启动
+    │
+    ├─ initTokenManager() → 启动 auth-v2.dat 文件监听
+    │
+    ├─ 请求到来 → getToken()
+    │   ├─ 缓存有效（> 5min）→ 直接返回
+    │   └─ 过期 → refresh → 写回 auth-v2.dat + .env
+    │
+    └─ 千问 App 刷新 auth-v2.dat → 文件监听自动拾取 → 更新缓存
+```
+
+**日常流程**：千问 App 后台运行 → `pnpm serve` → 自动续命喵～

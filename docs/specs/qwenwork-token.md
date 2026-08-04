@@ -2,28 +2,39 @@
 
 ## 目标
 
-管理千问办公 OAuth token 的获取、缓存、自动刷新和灾备，为签名模块提供有效的 access token + refresh token 喵～
+管理千问办公 OAuth token 的获取、缓存、自动刷新和灾备，为签名模块提供有效的 access token + refresh token。支持 auth-v2.dat 文件监听自动拾取千问 App 的 token 刷新，双向同步避免轮换互踩喵～
 
 ## 输入输出
 
 **输入：**
-- `getToken()`：无参，返回当前有效 `QwenTokenState`
+- `getToken()`：无参，返回当前有效 `QwenTokenState`（缓存 + 按需刷新）
 - `refreshDeviceToken(refreshToken)`：接受 ory_rt_ 前缀的 refresh token，返回新 `QwenTokenState`
-- `forceRefresh()`：无参，强制刷新一次（capture-key 验证用）
+- `forceRefresh()`：无参，强制刷新一次（capture-key 诊断用）
+- `initTokenManager()`：启动时调用，启动 auth-v2.dat 文件监听
 
 **输出：**
 - `QwenTokenState`：`{ token, refreshToken, user: { uid, name, email }, expiresAt, raw? }`
 
 ## 关键约束
 
-### Token 来源优先级
+### Token 缓存策略
 
-按以下顺序尝试，成功即返回喵：
+```
+  getToken() 调用
+      │
+  cached 存在且 expiresAt > now + 5min？
+      │ 是 → 直接返回，零网络请求
+      │ 否 ↓
+  ① cached.refreshToken → refreshDeviceToken()
+      │ 失败 ↓ 重读 auth-v2.dat
+  ② decryptAuthFile() → token 有效直接用 / refresh token 刷新
+      │ 失败 ↓
+  ③ .env QWEN_KEYS → refreshDeviceToken()
+      │ 失败 ↓
+  throw Error('无可用 token 源')
+```
 
-1. **内存缓存**（`cached`）：`Date.now() < cached.expiresAt - 5 * 60_000`（5 分钟缓冲）→ 直接返回
-2. **缓存中的 refresh token**：`cached.refreshToken` → `refreshDeviceToken()` 刷新
-3. **auth-v2.dat 文件**：safeStorage 解密（macOS Keychain）→ 直接返回解密结果
-4. **.env QWEN_KEYS**：`loadRefreshTokenFromEnv()` → `refreshDeviceToken()` 自举刷新
+缓存检查：`Date.now() < expiresAt - 5 * 60_000`（提前 5 分钟刷新）。并发防重：`refreshing` Promise 单飞。
 
 ### safeStorage 解密（`decryptAuthFile`，按平台分派）
 
@@ -46,7 +57,12 @@
    - `aes-256-gcm`，`setAuthTag(tag)` → 解出明文 JSON
 3. **JSON 解析**：同 macOS，必须含 `token` + `refreshToken`
 
-> 反向前提：`encrypted_key` 以 `"DPAPI\0"` 开头（非 App-Bound 的 `APPB` 格式）。若未来 Electron 升级启用 App-Bound Encryption（Chromium 127+），需额外处理 app-bound key——见 DECISIONS 的已知边界。
+### safeStorage 加密（`encryptAuthFile`，写回 auth-v2.dat）
+
+与解密完全对称，复用已有 AES key（无需重新 DPAPI 解包）。千问 App 不做文件完整性校验，加密格式正确即可。
+
+**macOS**：`AES-128-CBC(key=aesKey, iv=0x20×16, JSON)` → `v10 + 密文`
+**Windows**：`AES-256-GCM(key=aesKey, nonce=randomBytes(12), JSON)` → `v10 + nonce + 密文 + tag`
 
 ### deviceToken/refresh API
 
@@ -55,12 +71,32 @@
 - **响应**：`{ device_token, refresh_token（轮换后的新值）, expires_at }`
 - **字段兼容**：`j.device_token ?? j.token`
 - **过期时间**：`expires_at` 为 ISO 字符串 → `Date.parse()`；缺失则 `Date.now() + 3600_000`
+- **刷新后写回**：
+  1. `encryptAuthFile()` → auth-v2.dat（双向同步，千问 App 下次读取拿到新 token）
+  2. `syncEnvRefreshToken()` → `.env` QWEN_KEYS
 
-### .env 同步（`syncEnvRefreshToken`）
+### auth-v2.dat 文件监听（`initTokenManager` → `startAuthFileWatch`）
 
-- **只写 QWEN_KEYS**，**绝不写 auth-v2.dat**（那是千问办公 App 的登录态，轮换会污染它）
-- 查找现有 `QWEN_KEYS=` 行则替换，否则追加
-- 文件 mode 600
+启动时调用 `initTokenManager()`：
+
+```
+fs.watch(settings.qwenOauthTokenPath)
+    │ 文件变化 ↓
+  debounce 1s（setTimeout）
+    │
+  mtime 去重（statSync().mtimeMs === lastKnownMtime → 跳过）
+    │
+    ▼
+  decryptAuthFile() → 更新 cached → syncEnvRefreshToken()
+```
+
+- Windows `fs.watch` 同一文件可能重复触发，debounce + mtime 双重去重
+- watcher 异常时自动重启（5s 后重试 `startAuthFileWatch()`）
+- 千问 App 刷新 token 后文件变化被自动拾取
+
+### syncEnvRefreshToken
+
+写 `.env` 的 `QWEN_KEYS` 行。双向同步（`encryptAuthFile` + `syncEnvRefreshToken`）确保插件和千问 App 持有相同的 refresh token，避免轮换互踩。
 
 ### 单飞防并发
 
@@ -77,11 +113,15 @@
 - [ ] 首次调用 `getToken()`，auth-v2.dat 存在（macOS）→ Keychain 解密返回
 - [ ] 首次调用 `getToken()`，auth-v2.dat 存在（Windows）→ DPAPI 解密返回
 - [ ] 首次调用 `getToken()`，auth-v2.dat 不存在，QWEN_KEYS 有值 → 自举刷新返回
+- [ ] access token 剩余 > 5 分钟 → 直接返回缓存，零网络请求
 - [ ] access token 临近过期（< 5min 缓冲）→ 自动用 refresh token 刷新
+- [ ] refresh 成功后 auth-v2.dat 已写回（双向同步）
+- [ ] refresh 成功后 .env QWEN_KEYS 已更新
 - [ ] 并发调用 `getToken()` → 只触发一次网络刷新（单飞）
-- [ ] `refreshDeviceToken` 成功后，.env QWEN_KEYS 已更新为新 refresh token
-- [ ] auth-v2.dat 文件不被修改（只读）
+- [ ] 千问 App 刷新 auth-v2.dat → 文件监听自动拾取新 token
+- [ ] watcher 异常 → 5s 后自动重启
 - [ ] `forceRefresh()` 返回新的 token + 新的 refresh token（已轮换）
+- [ ] macOS + Windows 加密写回格式与解密对称
 
 ## 已知边界
 
@@ -94,3 +134,5 @@
 - `syncEnvRefreshToken` 失败只 `console.warn`，不抛异常（不影响主流程）
 - `cached.user` 在自举刷新时为空 `{ uid: '' }`（.env 无用户信息），后续从 JWT 解出
 - auth-v2.dat 的 `raw` 字段保留原始 JSON（含 `loginDeviceId` 等千问办公内部字段）
+- 千问 App 如果采用原子写入（先写临时文件再 rename），`fs.watch` 可能在 rename 后丢失监听；watcher 异常重启机制会自愈
+- refresh token 服务端可能有绝对过期时间（未逆向），到时间仍需重新登录千问 App

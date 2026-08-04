@@ -116,7 +116,30 @@ function decryptAuthFile(filePath: string): QwenTokenState {
   };
 }
 
-/** deviceToken/refresh：换取新 token + 轮换 refresh token */
+/** 加密 JSON → auth-v2.dat 格式（写回千问办公 App 登录态，复用已有 AES key） */
+function encryptAuthFile(filePath: string, json: any): void {
+  const plaintext = Buffer.from(JSON.stringify(json), 'utf8');
+  if (process.platform === 'win32') {
+    const key = getWindowsAesKey();
+    const nonce = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce);
+    const enc = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    // v10 + 12B nonce + ciphertext + 16B tag
+    const out = Buffer.concat([Buffer.from('v10'), nonce, enc, tag]);
+    fs.writeFileSync(filePath, out, { mode: 0o600 });
+  } else {
+    const pw = getKeychainPassword();
+    const aesKey = crypto.pbkdf2Sync(Buffer.from(pw, 'utf8'), 'saltysalt', 1003, 16, 'sha1');
+    const iv = Buffer.alloc(16, 0x20);
+    const cipher = crypto.createCipheriv('aes-128-cbc', aesKey, iv);
+    const enc = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const out = Buffer.concat([Buffer.from('v10'), enc]);
+    fs.writeFileSync(filePath, out, { mode: 0o600 });
+  }
+}
+
+/** deviceToken/refresh：换取新 token + 轮换 refresh token + 写回 auth-v2.dat */
 export async function refreshDeviceToken(refreshToken: string): Promise<QwenTokenState> {
   const url = `${settings.qwenBaseUrl}${settings.qwenDeviceRefreshPath}`;
   const res = await fetch(url, {
@@ -135,7 +158,18 @@ export async function refreshDeviceToken(refreshToken: string): Promise<QwenToke
   }
   const expiresAt = typeof j.expires_at === 'string' ? Date.parse(j.expires_at) : Date.now() + 3600_000;
   const user = cached?.user ?? { uid: '' };
-  // 只同步 .env QWEN_KEYS（密钥池闭环）。绝不写回 auth-v2.dat——那是千问办公 App 的登录态，轮换会污染它。
+
+  // 写回 auth-v2.dat：让千问办公 App 也拿到新 refresh token，避免轮换互踩
+  if (cached?.raw && fs.existsSync(settings.qwenOauthTokenPath)) {
+    try {
+      const updatedRaw = { ...cached.raw, token, refreshToken: rt, expiresAt: j.expires_at ?? cached.raw.expiresAt };
+      encryptAuthFile(settings.qwenOauthTokenPath, updatedRaw);
+      lastKnownMtime = fs.statSync(settings.qwenOauthTokenPath).mtimeMs;
+      console.log('[qwenwork] 已写回 auth-v2.dat（千问 App 同步）');
+    } catch (e: any) {
+      console.warn(`[qwenwork] auth-v2.dat 写回失败（App 可能失步）: ${e.message}`);
+    }
+  }
   syncEnvRefreshToken(rt);
   return { token, refreshToken: rt, user, expiresAt, raw: cached?.raw };
 }
@@ -168,6 +202,45 @@ function syncEnvRefreshToken(refreshToken: string): void {
 let cached: QwenTokenState | null = null;
 let refreshing: Promise<QwenTokenState> | null = null;
 
+// —— auth-v2.dat 文件监听（千问 App 刷新时自动拾取新 token） ——
+let authWatcher: fs.FSWatcher | null = null;
+let watchDebounce: NodeJS.Timeout | null = null;
+let lastKnownMtime = 0;
+
+/** 启动 auth-v2.dat 监听（Windows fs.watch 同一文件可能重复触发，靠 debounce + mtime 去重） */
+function startAuthFileWatch(): void {
+  if (authWatcher || !fs.existsSync(settings.qwenOauthTokenPath)) return;
+  try {
+    lastKnownMtime = fs.statSync(settings.qwenOauthTokenPath).mtimeMs;
+    authWatcher = fs.watch(settings.qwenOauthTokenPath, (_eventType) => {
+      if (watchDebounce) clearTimeout(watchDebounce);
+      watchDebounce = setTimeout(() => {
+        watchDebounce = null;
+        try {
+          const stat = fs.statSync(settings.qwenOauthTokenPath);
+          if (stat.mtimeMs === lastKnownMtime) return; // mtime 未变 = 无实际写入
+          lastKnownMtime = stat.mtimeMs;
+          console.log('[qwenwork] auth-v2.dat 已更新（千问 App 刷新了 token），重新读取…');
+          const fresh = decryptAuthFile(settings.qwenOauthTokenPath);
+          cached = fresh;
+          syncEnvRefreshToken(fresh.refreshToken);
+          console.log(`[qwenwork] 已拾取新 token（有效期至 ${new Date(fresh.expiresAt).toISOString()}）`);
+        } catch (e: any) {
+          console.warn(`[qwenwork] auth-v2.dat 重读失败: ${e.message}`);
+        }
+      }, 1000);
+    });
+    authWatcher.on('error', (err) => {
+      console.warn(`[qwenwork] auth-v2.dat 监听异常: ${err.message}，将重启监听`);
+      authWatcher = null;
+      setTimeout(startAuthFileWatch, 5000);
+    });
+    console.log(`[qwenwork] 已启动 auth-v2.dat 监听（${settings.qwenOauthTokenPath}）`);
+  } catch (e: any) {
+    console.warn(`[qwenwork] 启动 auth-v2.dat 监听失败: ${e.message}`);
+  }
+}
+
 /** 获取当前有效 token（缓存 + 临近过期自动刷新，单飞防并发） */
 export async function getToken(): Promise<QwenTokenState> {
   if (cached && Date.now() < cached.expiresAt - 5 * 60_000) {
@@ -185,14 +258,30 @@ export async function getToken(): Promise<QwenTokenState> {
         console.log(`[qwenwork] token 已刷新（有效期至 ${new Date(next.expiresAt).toISOString()}）`);
         return next;
       } catch (e: any) {
-        console.warn(`[qwenwork] token 刷新失败，尝试其他源: ${e.message}`);
+        console.warn(`[qwenwork] token 刷新失败（${e.message}），尝试从 auth-v2.dat 拾取…`);
+        // 刷新链可能断了（App 那边也刷新过）→ 立刻重读文件试试
       }
     }
-    // 源②：auth-v2.dat（App 登录态，优先持久源）
+    // 源②：auth-v2.dat（App 登录态，优先持久源；监听器可能已更新 cached，但这里强制重读）
     if (fs.existsSync(settings.qwenOauthTokenPath)) {
       try {
-        cached = decryptAuthFile(settings.qwenOauthTokenPath);
-        return cached;
+        const fresh = decryptAuthFile(settings.qwenOauthTokenPath);
+        // 如果文件里的 token 还有效（非过期）→ 直接用
+        if (fresh.expiresAt > Date.now() + 5 * 60_000) {
+          cached = fresh;
+          console.log(`[qwenwork] 从 auth-v2.dat 拾取有效 token（有效期至 ${new Date(fresh.expiresAt).toISOString()}）`);
+          return fresh;
+        }
+        // 文件里的也过期了 → 用它的 refresh token 刷新
+        try {
+          const next = await refreshDeviceToken(fresh.refreshToken);
+          next.user = fresh.user;
+          cached = next;
+          console.log(`[qwenwork] 用 auth-v2.dat 的 refresh token 刷新成功（有效期至 ${new Date(next.expiresAt).toISOString()}）`);
+          return next;
+        } catch (e2: any) {
+          console.warn(`[qwenwork] auth-v2.dat 的 refresh token 也失效: ${e2.message}`);
+        }
       } catch (e: any) {
         console.warn(`[qwenwork] auth-v2.dat 解密失败: ${e.message}`);
       }
@@ -200,16 +289,25 @@ export async function getToken(): Promise<QwenTokenState> {
     // 源③：.env QWEN_KEYS（capture-key 备份的 refresh token，自举：拷项目即可用）
     const rt = loadRefreshTokenFromEnv();
     if (rt) {
-      const next = await refreshDeviceToken(rt);
-      next.user = { uid: '' };
-      cached = next;
-      console.log(`[qwenwork] 已用 QWEN_KEYS 自举刷新（有效期至 ${new Date(next.expiresAt).toISOString()}）`);
-      return next;
+      try {
+        const next = await refreshDeviceToken(rt);
+        next.user = cached?.user ?? { uid: '' };
+        cached = next;
+        console.log(`[qwenwork] 已用 QWEN_KEYS 自举刷新（有效期至 ${new Date(next.expiresAt).toISOString()}）`);
+        return next;
+      } catch (e: any) {
+        console.warn(`[qwenwork] QWEN_KEYS 刷新也失败: ${e.message}`);
+      }
     }
-    throw new Error('无可用 token 源（auth-v2.dat 缺失/失效且 QWEN_KEYS 为空）');
+    throw new Error('无可用 token 源（所有 refresh token 均已失效，请重开千问办公 App 登录）');
   })().finally(() => { refreshing = null; });
 
   return refreshing;
+}
+
+/** 初始化 token 管理（启动时调用：加载初始 token + 启动文件监听） */
+export function initTokenManager(): void {
+  startAuthFileWatch();
 }
 
 /** 强制刷新一次（capture-key 用：验证刷新链 + 拿到新 token） */

@@ -37,10 +37,10 @@
 | 原则 | 说明 |
 |------|------|
 | **纯翻译层** | 只做 OpenAI ↔ 上游协议转换，不引入业务逻辑、不做 prompt engineering |
-| **无状态** | 每个请求独立签名（qwenwork）或独立注入头（wukong），无 session 存储 |
+| **无状态** | 每个请求独立签名（qwenwork）或独立注入头（wukong），无 session 存储（token 缓存是性能优化，非业务状态） |
 | **字节透传** | wukong 通道 SSE 原样 pipe；qwenwork 通道仅解包外层 SSE wrapper，内层 chunk 原样转发 |
 | **通道隔离** | `src/qwenwork/` 与 `src/wukong/` 目录完全独立，共享骨架仅在 `src/index.ts` |
-| **自动恢复** | WS 断线指数退避重连（max 60s）；token 过期自动刷新；端口占用自动 kill |
+| **自动恢复** | WS 断线指数退避重连（max 60s）；token 过期按需刷新 + auth-v2.dat 文件监听自动拾取；端口占用自动 kill |
 
 ---
 
@@ -54,7 +54,7 @@ src/
 ├── pluginClient.ts       # WebSocket 客户端：注册 / 心跳 / env 轮询 / 重连
 ├── qwenwork/
 │   ├── client.ts         # qwenwork 通道转发：签名 + SSE 解包 + tool_calls 标准化
-│   ├── auth.ts           # token 管理：safeStorage 解密（Keychain/DPAPI）/ refresh / 三源 fallback
+│   ├── auth.ts           # token 管理：safeStorage 解密/加密（Keychain/DPAPI）/ refresh / 文件监听 / 三源 fallback
 │   └── signer.ts         # 请求签名：AES-128-CBC + RSA_PKCS1 + MD5
 └── wukong/
     └── client.ts         # wukong 通道转发：DEAP 头注入 + body 清洗 + 字节透传
@@ -152,13 +152,10 @@ export const isQwenwork = (): boolean => CHANNEL === 'qwenwork';
 `forwardChatCompletions(body, res, authHeader)` 处理流程：
 
 ```
-Authorization: Bearer ory_rt_xxx
+  getToken()              ← 缓存管理（5min 缓冲，按需刷新 + 文件监听自动拾取）
         │
-        ▼
-  extractRefreshToken()     ← 校验 ory_rt_ 前缀，否则 401
-        │
-        ▼
-  refreshDeviceToken(rt)    ← POST /api/v1/deviceToken/refresh → access token (JWT)
+        │ 缓存全失效？灾备 ↓
+  extractRefreshToken(authHeader) ← 从 xrl-router 透传的 Authorization 头取 ory_rt_
         │
         ▼
   extractUidFromToken(jwt)  ← 解 JWT payload.sub / .uid / .user_id
@@ -176,6 +173,8 @@ Authorization: Bearer ory_rt_xxx
   ┌─ stream=true:  外层 SSE 解包 → 内层 OpenAI chunk 透传
   └─ stream=false: delta 聚合 → 完整 chat.completion JSON
 ```
+
+**Token 策略（方案 A）**：不再每请求都 refresh（避免插件与千问 App 轮换互踩导致 refresh token 快速失效）。`getToken()` 维护内存缓存，access token 剩余 > 5 分钟时直接返回，零网络开销。refresh 成功后写回 `auth-v2.dat`（双向同步），千问 App 下次读取时拿到同一个 refresh token，避免轮换互踩。
 
 **静态头**：12 个固定值（`Cosy-Business-Product: qoder_work`, `Cosy-Scene: qwork`, `Cosy-Version: 1.0.47` 等；其中 `Login-Version`、`x-model-source` 非 `Cosy-*` 前缀）。
 
@@ -208,16 +207,37 @@ macOS（Keychain + PBKDF2 + AES-128-CBC）与 Windows（Local State 取 key → 
 
 #### refreshDeviceToken
 
-`POST {qwenBaseUrl}/api/v1/deviceToken/refresh`，body `{ refresh_token, target: "c" }`。响应包含 `device_token`（新 access token）+ `refresh_token`（轮换后的新 refresh token）。刷新成功后调用 `syncEnvRefreshToken()` 写回 `.env`。
+`POST {qwenBaseUrl}/api/v1/deviceToken/refresh`，body `{ refresh_token, target: "c" }`。响应包含 `device_token`（新 access token）+ `refresh_token`（轮换后的新 refresh token）。刷新成功后：
+1. `encryptAuthFile()` 写回 `auth-v2.dat`（双向同步，千问 App 下次读取时拿到新 refresh token）
+2. `syncEnvRefreshToken()` 写回 `.env` QWEN_KEYS
+
+写回 `auth-v2.dat` 使用与解密完全对称的加密方式（Windows: AES-256-GCM / macOS: AES-128-CBC），复用已有 AES key。
+
+#### initTokenManager — 启动初始化
+
+启动时调用 `startAuthFileWatch()`：
+
+```
+fs.watch(auth-v2.dat)
+    │ 文件变化 ↓
+  debounce 1s + mtime 去重
+    │
+    ▼
+  decryptAuthFile() → 更新 cached → syncEnvRefreshToken()
+```
+
+千问 App 自己刷新 token 时，文件监听自动拾取新值并更新内存缓存。Windows `fs.watch` 同一文件可能重复触发，靠 debounce + mtime 去重。watcher 异常时自动重启（5s 后重试）。
 
 #### getToken — 三源 fallback
 
 ```
-  ① 内存缓存 (cached.refreshToken)
+  缓存有效？（expiresAt > now + 5min）→ 直接返回，零网络请求
+     │ 无效 ↓
+  ① 内存缓存 refresh token → refreshDeviceToken()
+     │ 失败 ↓ 重读 auth-v2.dat
+  ② auth-v2.dat 解密 → token 有效直接用 / refresh token 刷新
      │ 失败 ↓
-  ② auth-v2.dat (Keychain → PBKDF2 → AES / Windows: DPAPI key → AES-256-GCM)
-     │ 失败 ↓
-  ③ .env QWEN_KEYS (capture-key 备份的 refresh token)
+  ③ .env QWEN_KEYS → refreshDeviceToken()
      │ 失败 ↓
   throw Error
 ```
@@ -226,7 +246,7 @@ macOS（Keychain + PBKDF2 + AES-128-CBC）与 Windows（Local State 取 key → 
 
 #### syncEnvRefreshToken
 
-**只写 `.env` 的 `QWEN_KEYS` 行**，绝不写回 `auth-v2.dat`。原因：`auth-v2.dat` 是千问办公 App 的登录态，外部写入会污染其 refresh token 轮换链。
+写 `.env` 的 `QWEN_KEYS` 行 + 写回 `auth-v2.dat`。双向同步确保插件和千问 App 持有相同的 refresh token，避免轮换互踩。
 
 ### 3.6 qwenwork/signer.ts — 请求签名
 

@@ -39,18 +39,22 @@
 
 ---
 
-## D-3: 为什么 qwenwork serve 不自行读取 auth-v2.dat？
+## D-3: 为什么 serve 现在自行管理 token 而非只消费密钥池？
 
-**背景**：`capture-key` 脚本负责从千问办公 App 提取 refresh token 并写入 `.env` 的 `QWEN_KEYS`。serve 进程只从 `Authorization` 头接收 `ory_rt_` 前缀的 token。
+**背景**：最初设计是 `capture-key` 负责提取 refresh token 写入 `.env`，serve 只从 `Authorization` 头消费 xrl-router 下发的 token。每请求都 refresh 一次。
 
-**决策**：serve 进程**不**直接读取 `auth-v2.dat`，只消费 xrl-router 下发的 refresh token喵。
+**问题**：
+- 每请求 refresh → refresh token 轮换互踩 → 不到 1 小时就断链，需频繁重新登录
+- 插件和千问 App 同时持有 refresh token，各自刷新会导致对方的 token 失效
 
-**原因**：
-- **职责分离**：`capture-key` 负责验证、刷新、备份；serve 只消费密钥池
-- **可移植性**：拷贝项目 + `.env` 到新机器即可自举，无需迁移 App 的登录态文件
-- **避免竞争**：多实例部署时不会争抢 `auth-v2.dat` 的读写
+**决策**：serve 自行管理 token 生命周期（`getToken()` 缓存 + 按需刷新 + auth-v2.dat 文件监听）。
 
-**证据**：`src/qwenwork/client.ts` 第 75-78 行（仅接受 `Authorization: Bearer <ory_rt_...>`，否则返回 401）喵～
+**收益**：
+- **按需刷新**：5 分钟缓冲期内零网络请求，平均 1 小时才刷新 1 次（之前每请求都刷）
+- **双向同步**：refresh 后写回 auth-v2.dat，千问 App 下次读取时拿到新 token，不互踩
+- **文件监听**：千问 App 自己刷新时，插件自动拾取新值，只要 App 在后台就几乎不用重新登录
+
+**证据**：`src/qwenwork/auth.ts`（`getToken()` / `startAuthFileWatch()` / `encryptAuthFile()`）、`src/qwenwork/client.ts`（`forwardChatCompletions` 改用 `getToken()`）
 
 ---
 
@@ -110,18 +114,25 @@
 
 ---
 
-## D-8: 为什么绝不写回 auth-v2.dat？
+## D-8: 为什么现在写回 auth-v2.dat？（推翻旧决策）
 
-**背景**：`auth-v2.dat` 是千问办公 App 的登录态文件，`capture-key` 从中提取 refresh token 后，只将结果写入 `.env` 的 `QWEN_KEYS`喵～
+**旧决策（已废弃）**：插件绝不写回 `auth-v2.dat`，只写 `.env QWEN_KEYS`。
 
-**决策**：插件**绝不**写回 `auth-v2.dat`。
+**旧原因**：担心外部写入会污染千问 App 的登录态。
 
-**原因**：
-- `auth-v2.dat` 属于千问办公 App，写回会污染其登录态
-- App 可能校验文件完整性，外部写入会导致 App 异常
-- `QWEN_KEYS`（`.env`）是插件自己的密钥池，与 App 的登录态完全隔离
+**问题**：
+- refresh token 采用轮换（rotation）策略，每次刷新产生新 token 并作废旧 token
+- 插件刷新后 `.env` 拿到新 token，但 `auth-v2.dat` 里的旧 token 已失效
+- 千问 App 下次用旧 token 刷新 → 链断 → 用户被迫重新登录
+- 实际测试：千问 App 不做文件完整性校验，写回加密格式正确即可
 
-**证据**：`src/qwenwork/auth.ts` 第 93-96 行注释（「只同步 `.env QWEN_KEYS`（密钥池闭环）。绝不写回 `auth-v2.dat`——那是千问办公 App 的登录态，轮换会污染它。」）喵～
+**新决策**：refresh 成功后用 `encryptAuthFile()` 写回 `auth-v2.dat`（与解密完全对称的加密方式）。
+
+**收益**：
+- 插件和千问 App 持有相同的 refresh token，不再轮换互踩
+- 只要 App 保持后台运行，token 链可以持续续命
+
+**证据**：`src/qwenwork/auth.ts`（`encryptAuthFile()` 第 133-154 行、`refreshDeviceToken()` 写回逻辑第 176-186 行）
 
 ---
 

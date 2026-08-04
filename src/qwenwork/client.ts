@@ -11,7 +11,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { settings } from '../config';
-import { refreshDeviceToken } from './auth';
+import { getToken, refreshDeviceToken } from './auth';
 import { buildSignMaterial, buildAuthHeaders } from './signer';
 
 /** qwenwork 应用层模型 → 展示名（注册时给 xrl-router 展示用） */
@@ -60,8 +60,11 @@ const INFER_QUERY = '?FetchKeys=llm_model_result&AgentId=agent_common';
 /**
  * 转发 OpenAI Chat Completions 请求到 qwenwork 推理网关。
  *
- * token 权威来源：请求 Authorization 透传的 refresh token（xrl-router 密钥池 QWEN_KEYS）。
- * 无 Authorization / 非 ory_rt_ 前缀 → 401（serve 不自行取 token，见 docs/README）。
+ * token 策略（方案 A）：
+ * - 使用 getToken() 缓存管理（5min 缓冲，过期才刷新）
+ * - 不再每请求都 refresh（避免轮换互踩导致 refresh token 失效）
+ * - auth-v2.dat 文件监听自动拾取千问 App 的刷新
+ * - Authorization header 透传的 refresh token 仅作灾备源
  */
 export async function forwardChatCompletions(
   body: any,
@@ -71,20 +74,31 @@ export async function forwardChatCompletions(
   const model = body.model || 'qwork-advanced';
   const isStream = body.stream === true;
 
-  // token 来源：只认 xrl-router 透传的 refresh token（密钥池）
-  const rt = extractRefreshToken(authHeader);
-  if (!rt) {
-    res.status(401).json({ error: { message: 'No refresh token provided (expected Authorization: Bearer <ory_rt_...> from xrl-router)' } });
-    return;
-  }
+  // token 来源：优先用 getToken() 缓存管理（按需刷新 + 文件监听自动拾取）
   let token;
   try {
-    token = await refreshDeviceToken(rt); // 密钥池 refresh token → 刷新为 access token
-  } catch (e: any) {
-    res.status(401).json({ error: { message: `refresh token 无效: ${e.message}` } });
-    return;
+    token = await getToken();
+  } catch (_e: any) {
+    // 缓存全失效 → 灾备：尝试 xrl-router 透传的 refresh token
+    const rt = extractRefreshToken(authHeader);
+    if (rt) {
+      try {
+        token = await refreshDeviceToken(rt);
+        token.user = { uid: extractUidFromToken(token.token) };
+        console.log('[qwenwork] 用密钥池 refresh token 灾备成功');
+      } catch (e2: any) {
+        res.status(401).json({ error: { message: `所有 token 源均失效: ${e2.message}` } });
+        return;
+      }
+    } else {
+      res.status(401).json({ error: { message: '无可用 token 源（请确保千问办公 App 已登录）' } });
+      return;
+    }
   }
-  token.user = { uid: extractUidFromToken(token.token) }; // 从 JWT 解 uid
+  // 确保有 uid（从 JWT 解出）
+  if (!token.user?.uid) {
+    token.user = { ...token.user, uid: extractUidFromToken(token.token) };
+  }
 
   // body：明文透传 + 补 request_id/session_id
   const forwardBody: any = {

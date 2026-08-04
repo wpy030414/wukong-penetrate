@@ -12,7 +12,7 @@
 
 | 通道 | 启动 | 后端 | 密钥 | 特性 |
 |------|------|------|------|------|
-| **qwenwork**（默认）| `pnpm serve` | 千问办公 → **智谱 glm-5.2** | 无需静态密钥：`auth-v2.dat`(safeStorage) + `deviceToken/refresh` 自动刷新 | 完全离线独立调用（[逆向成果](./docs/reverse/QWENWORKCN_REVERSE.md)）|
+| **qwenwork**（默认）| `pnpm serve` | 千问办公 → **智谱 glm-5.2** | 自动管理：`auth-v2.dat`(safeStorage) + `deviceToken/refresh` 按需刷新 + 文件监听自动拾取 + 双向同步 | 千问 App 后台运行即可，几乎不用重新登录（[逆向成果](./docs/reverse/QWENWORKCN_REVERSE.md)）|
 | **wukong** | `pnpm serve:wukong` | 钉钉悟空 DEAP | `WUKONG_KEYS`（`pnpm capture-key:wukong` 抓取）| 注入 DEAP 业务头（[逆向成果](./docs/reverse/WUKONG_REVERSE.md)）|
 
 本插件自身不跑任何模型，全部能力来自远端网关喵～
@@ -33,13 +33,16 @@
 pnpm install
 
 # qwenwork 通道（默认）
-pnpm capture-key    # 验证登录态 + 刷新 token + 备份 QWEN_KEYS
-pnpm serve
+# 前置：千问办公 App 已登录（首次需运行 capture-key 验证，之后 serve 自动管理）
+pnpm capture-key    # 验证登录态 + 刷新 token + 备份 QWEN_KEYS（仅首次或诊断时用）
+pnpm serve          # 启动后自动监听 auth-v2.dat，千问 App 后台运行即可
 
 # wukong 通道
 pnpm capture-key:wukong   # mitmproxy 抓 DEAP 密钥
 pnpm serve:wukong
 ```
+
+**qwenwork 通道日常使用**：只要千问 App 保持后台运行，`pnpm serve` 会自动续命（按需刷新 + 文件监听自动拾取 + 双向同步），几乎不用重新登录喵～
 
 ## 验证
 

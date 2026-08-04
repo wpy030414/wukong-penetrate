@@ -15,6 +15,7 @@ import { PluginClient } from './pluginClient';
 import { CHANNEL, isQwenwork, PLUGIN_ID } from './channel';
 import { forwardChatCompletions as forwardQwenChat } from './qwenwork/client';
 import { forwardChatCompletions as forwardWukongChat } from './wukong/client';
+import { initTokenManager } from './qwenwork/auth';
 
 const app: Express = express();
 
@@ -108,6 +109,11 @@ app.post('/v1/chat/completions', async (req: Request, res: Response) => {
 async function startServer() {
   const port = settings.port;
   const host = '0.0.0.0';
+
+  // qwenwork 通道：启动 token 管理器（auth-v2.dat 文件监听 + 自动拾取）
+  if (isQwenwork()) {
+    initTokenManager();
+  }
 
   await killPortProcess(port);
   app.listen(port, host, () => {
