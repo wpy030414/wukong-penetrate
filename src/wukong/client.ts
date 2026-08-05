@@ -74,16 +74,32 @@ export async function forwardChatCompletions(req: any, res: any): Promise<void> 
   const upstreamUrl = `${settings.deapBaseUrl}/chat/completions`;
   const headers = buildDeapHeaders(deapKey);
 
+  // 客户端断开时取消上游请求，避免无谓消耗 + 写已关闭的 res 导致崩溃
+  // 注意：Node.js 24 下 req.on('close') 在请求体消费完就触发（不等连接关闭）
+  // 所以必须监听 res.on('close')（连接真正关闭时才触发）
+  const abortController = new AbortController();
+  const onClientClose = () => {
+    if (!res.writableEnded) abortController.abort();
+  };
+  res.on('close', onClientClose);
+
+  // 连接超时：60s 内上游必须响应（fetch 本身无默认超时，DEAP 挂起会导致 CC 先超时断开）
+  const connectTimeout = setTimeout(() => abortController.abort(), 60_000);
+
   try {
     const resp = await fetch(upstreamUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal: abortController.signal,
     });
+    clearTimeout(connectTimeout);
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      res.status(resp.status).type('application/json').send(text || JSON.stringify({ error: { message: `DEAP returned ${resp.status}` } }));
+      if (!res.headersSent) {
+        res.status(resp.status).type('application/json').send(text || JSON.stringify({ error: { message: `DEAP returned ${resp.status}` } }));
+      }
       return;
     }
 
@@ -125,9 +141,21 @@ export async function forwardChatCompletions(req: any, res: any): Promise<void> 
     } else {
       // 非流式：直接透传 JSON
       const data = await resp.json();
-      res.json(data);
+      if (!res.headersSent) res.json(data);
     }
   } catch (error: any) {
+    // 客户端主动断开 → 正常终止，无需报错
+    if (error.name === 'AbortError') {
+      if (!res.writableEnded) res.end();
+      return;
+    }
+    // 流式模式已发过头 → 只能静默结束，不能再 set header / status
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
     res.status(502).json({ error: { message: `Upstream error: ${error.message}` } });
+  } finally {
+    res.removeListener('close', onClientClose);
   }
 }
