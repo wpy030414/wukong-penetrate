@@ -3,7 +3,7 @@
 > 本文件记录 wukong-penetrate 项目关键设计决策背后的**历史原因**，防止架构漂移。
 > 每条决策回答的是「为什么」而非「怎么做」。
 
-版本：0.1.0 | 最后更新：2026-08-02
+版本：0.2.0 | 最后更新：2026-08-05
 
 ---
 
@@ -153,3 +153,54 @@
 **收益**：消除多模型假象，减少用户配置错误；插件注册信息与实际能力一致喵。
 
 **证据**：`src/config.ts` 第 66-67 行（默认值）、`src/pluginClient.ts` 第 100 行（`tier: 'custom'`）、`src/qwenwork/client.ts`（无 MODEL_ALIASES）
+
+---
+
+## D-10: 为什么 wukong 流式从纯字节透传改为按行拆分 + 逐行 flush？
+
+**背景**：D-2 决策是「直接透传字节流」，`reader.read()` → `res.write()` 不做任何处理喵～
+
+**问题**：
+- 上游 DEAP 网关的 TCP 层会把多个 SSE chunk 合并在一个 TCP segment 里发送
+- 客户端收到一大块数据后才拆分 SSE event，导致流式输出「一块一块出」而非逐字输出
+- 用户体验严重退化，看起来像非流式
+
+**决策**：按 `\n` 拆分每个 `reader.read()` 的结果，逐行 `res.write(line + '\n')` + `flush()`。
+
+**收益**：
+- 客户端每收到一行就立即渲染，流式输出平滑
+- `flush()` 确保 Express/compression 中间件不缓冲
+- 用 `TextDecoder({ stream: true })` + buffer 拼接处理跨 chunk 的不完整行
+
+**证据**：`src/wukong/client.ts` 第 97-119 行（buffer + split + flush 逻辑）
+
+---
+
+## D-11: 为什么 qwenwork 重新引入多模型列表？（部分推翻 D-9）
+
+**背景**：D-9 决策将 qwenwork 默认模型精简为仅 `qwork-advanced`，认为只有一个可用模型喵～
+
+**问题**：
+- 实际上 qwenwork 网关已支持多个模型：`qwork-auto`（Qwen3.7-plus）、`qwork-lite`（DeepSeek-V4-flash）、`qmodel_latest`（Qwen3.8-max）
+- 只暴露一个模型限制了用户选择
+
+**决策**：重新扩展默认模型列表为 4 个，同时保留 `DISPLAY_NAMES` 映射给 xrl-router 展示用。wukong 通道则删除 `DISPLAY_NAMES`（model_id 本身就是展示名）。
+
+**收益**：用户可以通过 xrl-router 选择不同的模型，灵活性更高喵。
+
+**证据**：`src/config.ts` 第 89-90 行（默认模型列表）、`src/qwenwork/client.ts` 第 19-22 行（DISPLAY_NAMES 新增 3 项）
+
+---
+
+## D-12: 为什么 serve 去掉了 tsx watch？
+
+**背景**：`pnpm serve` 原先用 `tsx watch` 自动监听文件变更重启喵～
+
+**问题**：
+- `auth-v2.dat` 文件监听（`fs.watch`）已经覆盖了 token 自动拾取需求
+- `tsx watch` 监听整个 `src/` 目录，开发时频繁重启反而干扰调试
+- watch 模式的进程管理与 `fs.watch` 的 watcher 生命周期可能冲突
+
+**决策**：`serve` 和 `serve:wukong` 改为 `tsx`（无 watch），文件变更需手动重启。
+
+**证据**：`package.json` scripts 字段

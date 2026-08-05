@@ -12,8 +12,8 @@
 
 | 通道 | 启动 | 后端 | 密钥 | 特性 |
 |------|------|------|------|------|
-| **qwenwork**（默认）| `pnpm serve` | 千问办公 → **智谱 glm-5.2** | 自动管理：`auth-v2.dat`(safeStorage) + `deviceToken/refresh` 按需刷新 + 文件监听自动拾取 + 双向同步 | 千问 App 后台运行即可，几乎不用重新登录（[逆向成果](./docs/reverse/QWENWORKCN_REVERSE.md)）|
-| **wukong** | `pnpm serve:wukong` | 钉钉悟空 DEAP | `WUKONG_KEYS`（`pnpm capture-key:wukong` 抓取）| 注入 DEAP 业务头（[逆向成果](./docs/reverse/WUKONG_REVERSE.md)）|
+| **qwenwork**（默认）| `pnpm serve` | 千问办公 → **智谱 glm-5.2** / Qwen3.7-plus / DeepSeek-V4-flash / Qwen3.8-max | 自动管理：`auth-v2.dat`(safeStorage) + `deviceToken/refresh` 按需刷新 + 文件监听自动拾取 + 双向同步 | 千问 App 后台运行即可，几乎不用重新登录（[逆向成果](./docs/reverse/QWENWORKCN_REVERSE.md)）|
+| **wukong** | `pnpm serve:wukong` | 钉钉悟空 DEAP | `WUKONG_KEYS`（`pnpm capture-key:wukong` 抓取）| 注入 DEAP 业务头 + 按行 flush 流式（[逆向成果](./docs/reverse/WUKONG_REVERSE.md)）|
 
 本插件自身不跑任何模型，全部能力来自远端网关喵～
 

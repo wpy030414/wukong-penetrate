@@ -12,7 +12,7 @@
 - Header：`Authorization: Bearer <sk-...>`（xrl-router 密钥池透传的 DEAP key）
 
 **输出：**
-- 流式（`stream: true`）：直接透传上游 SSE 字节流
+- 流式（`stream: true`）：按行拆分后逐行 flush 透传上游 SSE（解决 TCP 合包问题）
 - 非流式：直接透传上游 JSON 响应
 
 ## 关键约束
@@ -49,12 +49,14 @@
    - `enable_search: true`
    - 合并调用方传入的 `body.extra_body`（spread 覆盖）
 
-### 流式透传
+### 流式透传（按行拆分 + 逐行 flush）
 
-- `reader.read()` → `res.write(value)` — 直接字节透传，不解包
-- 每个 chunk 后调用 `res.flush()`（若存在）
+- `reader.read()` → `TextDecoder` 解码 → 按 `\n` 拆分 → 逐行 `res.write(line + '\n')` + `flush()`
+- 用 buffer 拼接跨 chunk 的不完整行（`lines.pop()` 留给下次）
+- 流结束后刷出 buffer 中剩余内容
 - 设置 4 个 SSE 响应头：`Content-Type`、`Cache-Control`、`Connection`、`X-Accel-Buffering`
 - `res.socket.setNoDelay(true)`
+- **原因**：上游 TCP 批量合包导致客户端「一块一块出」，按行 flush 确保流式输出平滑（D-10）
 
 ### 非流式透传
 
@@ -70,7 +72,7 @@
 
 - [ ] 传入有效 `sk-` key，返回 200 + DEAP 响应
 - [ ] 不传 Authorization → 401
-- [ ] 流式：客户端收到的字节与上游 DEAP 返回完全一致
+- [ ] 流式：客户端逐行收到 SSE 数据（不是一块一块出）
 - [ ] 非流式：客户端收到的 JSON 与上游 DEAP 返回完全一致
 - [ ] 请求头包含全部 12 个 DEAP 业务头
 - [ ] 请求头不含 `Accept: text/event-stream`
@@ -83,5 +85,5 @@
 - DEAP key 格式为 `sk-` + 32 字符 `[0-9a-z]`（非 hex），有效期约 29 天
 - `user_query` 提取逻辑：只取 `content` 为 string 的最后一条 user message；若所有 user message 的 content 都非 string → 空字符串
 - 上游 `resp.body` 为 null 时直接 `res.end()`（不报错）
-- 模型展示名映射：`dingtalk-auto` → `qwen3.7-plus`（仅用于 xrl-router 注册展示）
+- 模型展示名：wukong 通道不再做别名映射，model_id 即 display_name（默认 `qwen3.7-max`、`qwen3.7-plus`）
 - 不做 token 刷新、签名、SSE 解包 — 与 qwenwork 通道的根本区别

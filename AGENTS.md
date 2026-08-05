@@ -10,8 +10,8 @@
 
 | 通道 | 选择方式 | 上游网关 | 后端模型 |
 |------|---------|---------|---------|
-| qwenwork（默认） | 不加参数 | `gateway.qwenwork.cn` | 智谱 GLM-5.2 |
-| wukong | `--use wukong` | `api-deap.dingtalk.com` | 通义千问 / Claude / GPT |
+| qwenwork（默认） | 不加参数 | `gateway.qwenwork.cn` | 智谱 GLM-5.2 / Qwen3.7-plus / DeepSeek-V4-flash / Qwen3.8-max |
+| wukong | `--use wukong` | `api-deap.dingtalk.com` | Qwen3.7-max / Qwen3.7-plus |
 
 协议边界：**只桥接 OpenAI Chat Completions（`/v1/chat/completions`）**，不做任何协议扩展喵。
 
@@ -23,9 +23,9 @@
 - **不做密钥轮转 / 重试逻辑** — 这是 xrl-router 的职责，插件只管转发
 - **不做本地模型推理** — 所有请求都走远端网关，插件是纯翻译层
 - **不实现 `/v1/models` 端点** — 模型列表通过 WebSocket 注册推送，不通过 HTTP 暴露
-- **不对 wukong 做 SSE byte-stream 解析** — 直接 passthrough，不要尝试解包
-- **qwenwork serve 不自己读 `auth-v2.dat`** — `capture-key` 备份到 `QWEN_KEYS` 环境变量，serve 只消费密钥池
-- **永不写回 `auth-v2.dat`** — 会污染千问办公 App 的登录态，后果严重喵！
+- **不对 wukong 做 SSE 解析** — 按行拆分 + 逐行 flush 即可，不要尝试解包 SSE data 字段
+- **~~qwenwork serve 不自己读 `auth-v2.dat`~~**（已推翻）— serve 通过 `getToken()` 三源 fallback 读取 auth-v2.dat，详见 D-3
+- **~~永不写回 `auth-v2.dat`~~**（已推翻）— refresh 成功后 `encryptAuthFile()` 写回，双向同步避免轮换互踩，详见 D-8
 - **永不复用抓到的 JWT / cosy-key** — 网关有 anti-replay 检测，复用会被封
 - **不做 tools / tool_use 翻译** — xrl-router 自己处理
 - **不实现非 Chat Completions 端点** — `/v1/embeddings`、`/v1/completions` 等一律不加
@@ -43,7 +43,7 @@ src/
 │   ├── auth.ts       # OAuth token 管理（safeStorage 解密 + 刷新）
 │   └── signer.ts     # RSA_PKCS1 + AES 签名（逆向自 asar）
 └── wukong/
-    └── client.ts     # 转发到 api-deap.dingtalk.com（DEAP 头注入）
+    └── client.ts     # 转发到 api-deap.dingtalk.com（DEAP 头注入 + 按行 flush）
 
 scripts/
 ├── qwenwork/capture-key.ts  # 验证 token + 刷新链 + 备份 QWEN_KEYS
@@ -73,7 +73,7 @@ docs/
 ## 开发约定
 
 - **包管理器：pnpm**（不是 npm — npm 会触发 arborist `Link.matches` 崩溃 bug，详见 MEMORY）
-- **dev 模式：tsx watch**，不需要 build 步骤 — tsx 直接跑 TypeScript
+- **dev 模式：tsx**（已去掉 watch — 文件变更需手动重启）
 - 通道选择：`--use wukong` 走 wukong，不加参数默认 qwenwork
 - 新增通道参照 `src/channel.ts` 的模式，加一个 channel 目录 + client.ts
 
@@ -81,8 +81,8 @@ docs/
 
 ```bash
 pnpm install              # 安装依赖（再次强调：不要用 npm）
-pnpm serve                # qwenwork 通道（tsx watch）
-pnpm serve:wukong         # wukong 通道
+pnpm serve                # qwenwork 通道（tsx，无 watch）
+pnpm serve:wukong         # wukong 通道（tsx，无 watch）
 pnpm capture-key          # qwenwork token 验证 + 备份
 pnpm capture-key:wukong   # wukong 密钥抓取
 ```
@@ -113,7 +113,7 @@ pnpm capture-key:wukong   # wukong 密钥抓取
 2. **「添加密钥轮转逻辑」** → xrl-router 的职责
 3. **「实现本地模型推理」** → 纯桥接插件
 4. **「复用抓到的 JWT / cosy-key」** → anti-replay 会封号
-5. **「写回 auth-v2.dat」** → 会污染 App 登录态
+5. ~~**「写回 auth-v2.dat」**~~ → 已允许（D-8），refresh 后双向同步
 
 ### 允许的任务方向
 

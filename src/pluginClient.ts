@@ -15,7 +15,6 @@ import dotenv from 'dotenv';
 import { settings } from './config';
 import { isQwenwork, PLUGIN_ID } from './channel';
 import { displayName as qwenDisplayName } from './qwenwork/client';
-import { displayName as wukongDisplayName } from './wukong/client';
 
 const ENV_POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
@@ -97,7 +96,7 @@ export class PluginClient {
   private sendRegister(): void {
     const models = settings.availableModels.map(id => ({
       model_id: id,
-      display_name: isQwenwork() ? qwenDisplayName(id) : wukongDisplayName(id),
+      display_name: isQwenwork() ? qwenDisplayName(id) : id,
       tier: 'custom',
     }));
 

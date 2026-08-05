@@ -8,15 +8,6 @@
 import { randomUUID } from 'node:crypto';
 import { settings } from '../config';
 
-/** wukong 应用层模型 → 展示名（注册给 xrl-router） */
-const DISPLAY_NAMES: Record<string, string> = {
-  'dingtalk-auto': 'qwen3.7-plus',
-};
-
-export function displayName(modelId: string): string {
-  return DISPLAY_NAMES[modelId] || modelId;
-}
-
 /** DEAP 要求的一整套业务头（缺任何一个 x-dingtalk-* 都会被拒 400） */
 function buildDeapHeaders(deapKey: string): Record<string, string> {
   return {
@@ -97,7 +88,7 @@ export async function forwardChatCompletions(req: any, res: any): Promise<void> 
     }
 
     if (isStream) {
-      // SSE 流式：直接透传字节流
+      // SSE 流式：按行拆分后逐条写入，避免上游 TCP 批量合包导致客户端「一块一块出」
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -106,11 +97,23 @@ export async function forwardChatCompletions(req: any, res: any): Promise<void> 
 
       if (resp.body) {
         const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
         try {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            res.write(value);
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop()!; // 末尾可能是不完整行，留给下次拼接
+            for (const line of lines) {
+              res.write(line + '\n');
+              if (typeof (res as any).flush === 'function') (res as any).flush();
+            }
+          }
+          // 流结束后刷出剩余内容
+          if (buffer) {
+            res.write(buffer);
             if (typeof (res as any).flush === 'function') (res as any).flush();
           }
         } finally {

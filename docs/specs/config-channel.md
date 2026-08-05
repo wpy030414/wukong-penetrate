@@ -42,7 +42,7 @@ function parseChannel(): Channel {
 | 环境变量 | 字段 | 默认值 |
 |---|---|---|
 | `PORT` | `port` | `19067` |
-| `AVAILABLE_MODELS` | `availableModels` | qwenwork: `qwork-advanced`；wukong: `dingtalk-auto` |
+| `AVAILABLE_MODELS` | `availableModels` | qwenwork: `qwork-advanced,qwork-auto,qwork-lite,qmodel_latest`；wukong: `qwen3.7-max,qwen3.7-plus` |
 | `XRL_ROUTER_URL` | `xrlRouterUrl` | `http://localhost:19068` |
 
 #### Qwenwork 通道变量

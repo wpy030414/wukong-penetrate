@@ -5,9 +5,9 @@
 | 字段 | 内容 |
 |------|------|
 | 产品名称 | xrl-router-plugin-qwenwork（双通道） |
-| 版本 | 0.1.0 |
+| 版本 | 0.2.0 |
 | 状态 | 已发布 |
-| 最后更新 | 2026-08-02 |
+| 最后更新 | 2026-08-05 |
 
 ---
 
@@ -27,7 +27,7 @@
 
 | 维度 | wukong（DEAP） | qwenwork（QwenWorkCN） |
 |------|---------------|----------------------|
-| 后端模型 | 通义千问 / Claude / GPT（多模型） | 智谱 GLM-5.2（单模型） |
+| 后端模型 | 通义千问（Qwen3.7-max / Qwen3.7-plus） | 智谱 GLM-5.2 / Qwen3.7-plus / DeepSeek-V4-flash / Qwen3.8-max |
 | 密钥类型 | 静态 `sk-` 密钥 | OAuth refresh token（`ory_rt_`） |
 | 密钥有效期 | ~29 天，过期需重抓 | 自动刷新，无感知轮换 |
 | 运行时依赖 | 需要 daemon 运行才能抓密钥 | 完全离线独立调用（逆向成果） |
@@ -70,7 +70,7 @@
 **验收标准：**
 - 客户端发送标准 OpenAI Chat Completions 请求（`stream: true` 或 `stream: false`）
 - 插件自动注入 12 个 DEAP 业务头并转发到 `api-deap.dingtalk.com`
-- 流式响应为 SSE 字节流透传，非流式响应为 JSON 透传
+- 流式响应为 SSE 按行拆分 + 逐行 flush 透传，非流式响应为 JSON 透传
 - 请求体自动注入 `extra_body`（`enable_thinking`、`user_query`、`enable_search`）
 
 ### US-2：密钥池管理（WUKONG_KEYS）
@@ -154,7 +154,7 @@
 |------|------|------|------|
 | F-1 | qwenwork Cosy 签名桥接 | qwenwork | 每请求生成随机 16B AES key → RSA 加密为 `Cosy-Key` → AES 加密 userInfo → MD5 签名 `Authorization`，转发到 `gateway.qwenwork.cn` |
 | F-2 | wukong DEAP 头注入 | wukong | 注入 12 个业务头（`x-dingtalk-*`、`x-wukong-*`、`x-litellm-session-id`），转发到 `api-deap.dingtalk.com` |
-| F-3 | 流式支持 | 双通道 | wukong：SSE 字节流直接透传；qwenwork：解包外层 SSE `{"body":"..."}` 为标准 OpenAI SSE |
+| F-3 | 流式支持 | 双通道 | wukong：SSE 按行拆分 + 逐行 flush（解决 TCP 合包）；qwenwork：解包外层 SSE `{"body":"..."}` 为标准 OpenAI SSE |
 | F-4 | 非流式支持 | 双通道 | wukong：JSON 直接透传；qwenwork：聚合所有 delta chunk 为完整 `chat.completion` JSON |
 | F-5 | 密钥池推送 | 双通道 | 每 5s 轮询 `.env`（qwenwork 读 `QWEN_KEYS`，wukong 读 `WUKONG_KEYS`），变化时推送 `keys_update` 给 xrl-router |
 | F-6 | WebSocket 注册/心跳/重连 | 双通道 | 启动时 `register`（plugin_id + 模型列表 + 密钥池），心跳 30s，断线指数退避重连（1s~60s） |
@@ -304,4 +304,4 @@ pnpm capture-key:wukong # 抓密钥
 
 ---
 
-*版本 0.1.0 · 最后更新 2026-08-02*
+*版本 0.2.0 · 最后更新 2026-08-05*

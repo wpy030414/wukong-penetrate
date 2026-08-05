@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — wukong-penetrate 架构地图
 
-> Version: 0.1.0 | Last updated: 2026-08-02
+> Version: 0.2.0 | Last updated: 2026-08-05
 >
 > 本文档描述稳定的结构关系，半年至一年不变。代码改动若偏离此处描述，需同步更新。
 
@@ -28,8 +28,11 @@
                                                      ┌────────▼────────┐                    ┌──────────▼──────────┐
                                                      │ gateway.        │                    │ api-deap.           │
                                                      │ qwenwork.cn     │                    │ dingtalk.com        │
-                                                     │ → 智谱 GLM-5.2  │                    │ → 通义/Claude/GPT   │
-                                                     └─────────────────┘                    └─────────────────────┘
+                                                     │ → 智谱 GLM-5.2  │                    │ → Qwen3.7-max/plus  │
+                                                     │   Qwen3.7-plus  │                    └─────────────────────┘
+                                                     │   DeepSeek-V4   │
+                                                     │   Qwen3.8-max   │
+                                                     └─────────────────┘
 ```
 
 ### 设计原则
@@ -38,7 +41,7 @@
 |------|------|
 | **纯翻译层** | 只做 OpenAI ↔ 上游协议转换，不引入业务逻辑、不做 prompt engineering |
 | **无状态** | 每个请求独立签名（qwenwork）或独立注入头（wukong），无 session 存储（token 缓存是性能优化，非业务状态） |
-| **字节透传** | wukong 通道 SSE 原样 pipe；qwenwork 通道仅解包外层 SSE wrapper，内层 chunk 原样转发 |
+| **字节透传** | wukong 通道 SSE 按行拆分 + 逐行 flush（解决上游 TCP 合包导致客户端「一块一块出」）；qwenwork 通道仅解包外层 SSE wrapper，内层 chunk 原样转发 |
 | **通道隔离** | `src/qwenwork/` 与 `src/wukong/` 目录完全独立，共享骨架仅在 `src/index.ts` |
 | **自动恢复** | WS 断线指数退避重连（max 60s）；token 过期按需刷新 + auth-v2.dat 文件监听自动拾取；端口占用自动 kill |
 
@@ -57,7 +60,7 @@ src/
 │   ├── auth.ts           # token 管理：safeStorage 解密/加密（Keychain/DPAPI）/ refresh / 文件监听 / 三源 fallback
 │   └── signer.ts         # 请求签名：AES-128-CBC + RSA_PKCS1 + MD5
 └── wukong/
-    └── client.ts         # wukong 通道转发：DEAP 头注入 + body 清洗 + 字节透传
+    └── client.ts         # wukong 通道转发：DEAP 头注入 + body 清洗 + 按行 flush
 ```
 
 ### 依赖图
@@ -66,8 +69,7 @@ src/
 index.ts
 ├── config.ts ← channel.ts
 ├── pluginClient.ts ← config.ts, channel.ts
-│   ├── qwenwork/client.ts (displayName)
-│   └── wukong/client.ts (displayName)
+│   └── qwenwork/client.ts (displayName)
 ├── qwenwork/client.ts ← config.ts, qwenwork/auth.ts, qwenwork/signer.ts
 │   ├── auth.ts ← config.ts
 │   └── signer.ts ← config.ts, auth.ts (types)
@@ -130,7 +132,10 @@ export const isQwenwork = (): boolean => CHANNEL === 'qwenwork';
     "api_path": "/v1/chat/completions"
   },
   "models": [
-    { "model_id": "qwork-advanced", "display_name": "glm-5.2", "tier": "custom" }
+    { "model_id": "qwork-advanced", "display_name": "glm-5.2", "tier": "custom" },
+    { "model_id": "qwork-auto", "display_name": "qwen3.7-plus", "tier": "custom" },
+    { "model_id": "qwork-lite", "display_name": "deepseek-v4-flash", "tier": "custom" },
+    { "model_id": "qmodel_latest", "display_name": "qwen3.8-max", "tier": "custom" }
   ],
   "keys": ["ory_rt_xxx"]
 }
@@ -178,7 +183,7 @@ export const isQwenwork = (): boolean => CHANNEL === 'qwenwork';
 
 **静态头**：12 个固定值（`Cosy-Business-Product: qoder_work`, `Cosy-Scene: qwork`, `Cosy-Version: 1.0.47` 等；其中 `Login-Version`、`x-model-source` 非 `Cosy-*` 前缀）。
 
-**展示名映射**：`qwork-advanced` → `glm-5.2`（注册给 xrl-router 的 display_name）。请求方向无别名映射——客户端发送什么 `model` 就透传什么，缺省时默认 `qwork-advanced`。
+**展示名映射**：`qwork-advanced` → `glm-5.2`、`qwork-auto` → `qwen3.7-plus`、`qwork-lite` → `deepseek-v4-flash`、`qmodel_latest` → `qwen3.8-max`（注册给 xrl-router 的 display_name）。请求方向无别名映射——客户端发送什么 `model` 就透传什么，缺省时默认 `qwork-advanced`。
 
 **流式 tool_calls 标准化**（适配 xrl-router 的转换逻辑）：
 - xrl-router 把「某 index 的首个 chunk」解析为 `content_block_start`（input 字段），其余分片作为 `input_json_delta` 处理
@@ -374,7 +379,7 @@ data: {"id":"chatcmpl-xxx","choices":[{"delta":{"content":"..."}}]}
 
 **请求体**：注入 `extra_body` / `enable_thinking` / `enable_search` / `stream_options`，其余字段原样透传。
 
-**响应**：直接字节透传（流式 SSE pipe / 非流式 JSON），不做任何解包或重组。
+**响应**：直接字节透传（非流式 JSON 原样透传；流式 SSE 按行拆分 + 逐行 `flush()`，避免上游 TCP 合包导致客户端一块一块出）。
 
 ---
 
@@ -408,7 +413,8 @@ data: {"id":"chatcmpl-xxx","choices":[{"delta":{"content":"..."}}]}
     "api_path": "/v1/chat/completions"
   },
   "models": [
-    { "model_id": "dingtalk-auto", "display_name": "qwen3.7-plus", "tier": "custom" }
+    { "model_id": "qwen3.7-max", "display_name": "qwen3.7-max", "tier": "custom" },
+    { "model_id": "qwen3.7-plus", "display_name": "qwen3.7-plus", "tier": "custom" }
   ],
   "keys": ["sk-xxx", "sk-yyy"]
 }
@@ -425,7 +431,7 @@ data: {"id":"chatcmpl-xxx","choices":[{"delta":{"content":"..."}}]}
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `PORT` | `19067` | HTTP 监听端口 |
-| `AVAILABLE_MODELS` | 按通道默认 | 逗号分隔的可用模型列表 |
+| `AVAILABLE_MODELS` | 按通道默认（qwenwork: `qwork-advanced,qwork-auto,qwork-lite,qmodel_latest`；wukong: `qwen3.7-max,qwen3.7-plus`） | 逗号分隔的可用模型列表 |
 | `XRL_ROUTER_URL` | `http://localhost:19068` | xrl-router WS 连接地址 |
 
 #### qwenwork 通道

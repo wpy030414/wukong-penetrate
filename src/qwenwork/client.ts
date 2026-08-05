@@ -17,6 +17,9 @@ import { buildSignMaterial, buildAuthHeaders } from './signer';
 /** qwenwork 应用层模型 → 展示名（注册时给 xrl-router 展示用） */
 const DISPLAY_NAMES: Record<string, string> = {
   'qwork-advanced': 'glm-5.2',
+  'qwork-auto': 'qwen3.7-plus',
+  'qwork-lite': 'deepseek-v4-flash',
+  'qmodel_latest': 'qwen3.8-max',
 };
 
 export function displayName(modelId: string): string {

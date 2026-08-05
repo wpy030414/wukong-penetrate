@@ -17,9 +17,9 @@
 
 ## 关键约束
 
-1. **Token 来源唯一**：只接受 `Authorization` 头中 `ory_rt_` 前缀的 refresh token；无 token 或非前缀 → 401，serve 不自行从本地文件取 token喵
-2. **Token 刷新链路**：`extractRefreshToken` → `refreshDeviceToken(rt)` 换取 access token → `extractUidFromToken(JWT payload)` 从 JWT 解出 uid
-3. **模型默认**：客户端未指定 `model` 时使用 `qwork-advanced`；指定了什么就透传什么（无别名映射）
+1. **Token 来源**：`getToken()` 三源 fallback（内存缓存 → auth-v2.dat → .env QWEN_KEYS）；灾备从 `Authorization` 头取 `ory_rt_` 前缀 refresh token喵
+2. **Token 刷新链路**：`getToken()` 缓存有效（> 5min）→ 直接返回；过期 → 内存 refresh token → `refreshDeviceToken(rt)` 换取 access token + 新 refresh token → 写回 auth-v2.dat + .env → `extractUidFromToken(JWT payload)` 从 JWT 解出 uid
+3. **模型默认**：客户端未指定 `model` 时使用 `qwork-advanced`；指定了什么就透传什么（无别名映射）。默认模型列表：`qwork-advanced`、`qwork-auto`、`qwork-lite`、`qmodel_latest`
 4. **Body 清洗**：`delete forwardBody.encode`、`delete forwardBody.extra_body`（qwenwork 网关明文即可，不需要 Encode=1）
 5. **自动填充**：`request_id` 和 `session_id` 缺失时用 `randomUUID()` 补全
 6. **Cosy 静态头**：12 个固定头（`Cosy-Business-Product: qoder_work`、`Cosy-Scene: qwork`、`Cosy-Version: 1.0.47` 等；其中 `Login-Version`、`x-model-source` 非 `Cosy-*` 前缀）

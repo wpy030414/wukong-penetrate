@@ -87,8 +87,8 @@ function env(key: string, fallback: string): string {
 export const settings: Settings = {
   port: parseInt(env('PORT', '19067'), 10),
   availableModels: (process.env.AVAILABLE_MODELS || (CHANNEL === 'qwenwork'
-    ? 'qwork-advanced'
-    : 'dingtalk-auto'))
+    ? 'qwork-advanced,qwork-auto,qwork-lite,qmodel_latest'
+    : 'qwen3.7-max,qwen3.7-plus'))
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),

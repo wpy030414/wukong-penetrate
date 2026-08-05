@@ -82,6 +82,12 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const mask = (k: string): string => (k && k.length > 10 ? `${k.slice(0, 10)}…${k.slice(-4)}` : '(无效)');
 const readFileSafe = (p: string): string => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
 
+/** Windows: 以 detached 方式启动进程（替代 start ""，避免 execSync 阻塞） */
+function startDetached(exe: string): void {
+  const child = spawn(exe, [], { detached: true, stdio: 'ignore', windowsHide: false });
+  child.unref();
+}
+
 function sh(cmd: string): ShResult {
   try {
     return { code: 0, out: execSync(cmd, { stdio: ['ignore', 'pipe', 'pipe'] }).toString() };
@@ -334,7 +340,7 @@ async function windowsPrepareProxy(): Promise<boolean> {
   if (daemonExe) {
     sh(`powershell -NoProfile -Command "Get-Process DingTalkReal -ErrorAction SilentlyContinue | Stop-Process -Force"`);
     await sleep(2000); // 等进程退出
-    sh(`start "" "${daemonExe}"`);
+    startDetached(daemonExe);
     console.log('   🔄 Daemon 已重启（读取新代理 127.0.0.1:8888）');
     // 等 daemon 就绪
     for (let i = 0; i < 15; i++) {
@@ -352,7 +358,7 @@ async function windowsPrepareProxy(): Promise<boolean> {
     const cliDir = path.dirname(CLI || '');
     const daemonPath = path.resolve(cliDir, '..', 'DingTalkReal.exe');
     if (fs.existsSync(daemonPath)) {
-      sh(`start "" "${daemonPath}"`);
+      startDetached(daemonPath);
       console.log('   🔄 Daemon 已启动');
       for (let i = 0; i < 15; i++) {
         await sleep(1000);
@@ -380,7 +386,7 @@ function windowsRestoreProxy(): void {
   console.log('   🧹 系统代理已还原');
   // 重启 Clash
   if (CLASH_WAS_RUNNING && CLASH_PATH) {
-    sh(`start "" "${CLASH_PATH}"`);
+    startDetached(CLASH_PATH);
     console.log('   ▶ Clash Verge 已重启');
   }
 }
@@ -442,7 +448,7 @@ async function ensureDaemonReady(): Promise<boolean> {
     // Windows: 直接运行 DingTalkReal.exe（service start 不支持）
     const daemonPath = path.resolve(path.dirname(CLI || ''), '..', 'DingTalkReal.exe');
     if (fs.existsSync(daemonPath)) {
-      sh(`start "" "${daemonPath}"`);
+      startDetached(daemonPath);
     } else {
       fail('找不到 DingTalkReal.exe');
       return false;

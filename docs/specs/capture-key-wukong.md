@@ -75,8 +75,9 @@ daemon 的 chat 客户端**无视 `HTTPS_PROXY` 环境变量**，只认系统级
 
 ### Windows 额外逻辑
 
-- **停 Clash Verge**：`Get-CimInstance Win32_Process` 找进程 → `Stop-Process` → cleanup 时 `start "" 路径` 重启
-- **重启 daemon**：代理设好后杀掉 DingTalkReal → 重新启动（让它读到新代理值）→ 轮询 `service status` 等就绪
+- **停 Clash Verge**：`Get-CimInstance Win32_Process` 找进程 → `Stop-Process` → cleanup 时 `startDetached()` 重启
+- **重启 daemon**：代理设好后杀掉 DingTalkReal → `startDetached()` 重新启动（让它读到新代理值）→ 轮询 `service status` 等就绪
+- **`startDetached()`**：`spawn(exe, [], { detached: true, stdio: 'ignore' })` + `child.unref()`，替代 `start ""`（避免 `execSync` 阻塞）
 - **Named pipe 检测**：`\\.\pipe\real-daemon` 存在 → daemon 实际就绪（CLI 可能因版本不匹配报错）
 - **wukong-cli 查找**：动态搜索 `C:\Program Files\Wukong\<version>\bin\wukong-cli.exe`（按版本号降序取最新）
 

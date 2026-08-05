@@ -89,7 +89,7 @@ if (this.connected) {
 ```
 
 - `tier`：统一为 `'custom'`
-- `display_name`：按通道调用 `qwenDisplayName()` 或 `wukongDisplayName()`
+- `display_name`：qwenwork 通道调用 `qwenDisplayName()`（有 DISPLAY_NAMES 映射）；wukong 通道直接用 `model_id`（无映射）
 
 ### close()
 

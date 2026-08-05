@@ -4,9 +4,9 @@
   "description": "xrl-router 双通道插件：qwenwork（千问办公→智谱GLM）与 wukong（钉钉悟空→DEAP），包装为 OpenAI 兼容本地服务",
   "scripts": {
     "capture-key": "tsx scripts/qwenwork/capture-key.ts",
-    "serve": "tsx watch src/index.ts",
+    "serve": "tsx src/index.ts",
     "capture-key:wukong": "tsx scripts/wukong/capture-key.ts",
-    "serve:wukong": "tsx watch src/index.ts --use wukong"
+    "serve:wukong": "tsx src/index.ts --use wukong"
   },
   "dependencies": {
     "cors": "^2.8.5",
