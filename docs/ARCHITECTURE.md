@@ -105,7 +105,7 @@ export const isQwenwork = (): boolean => CHANNEL === 'qwenwork';
 
 | 分组 | 字段 | 说明 |
 |------|------|------|
-| 通用 | `port`, `availableModels`, `channel` | 监听端口、可用模型列表、当前通道 |
+| 通用 | `port`, `availableModels`, `channel` | 监听端口（按通道默认：qwenwork 19067 / wukong 19066，可同时启动）、可用模型列表、当前通道 |
 | wukong | `deapBaseUrl`, `deapUserType`, `deapScenarioCode`, `deapProductCode`, `deapAbilityCode`, `deapWukongClientVersion`, `deapWukongDeviceType`, `deapAgentLoopVersion`, `deapBizParam` | DEAP 网关地址 + 12 个业务头参数 |
 | qwenwork | `qwenBaseUrl`, `qwenOauthTokenPath`, `qwenKeychainService`, `qwenKeychainAccount`, `qwenDeviceRefreshPath`, `qwenRsaPublicKeyPath`, `qwenRefreshIntervalMs`, `qwenTarget` | 推理网关地址 + OAuth/签名参数 |
 | xrl-router | `xrlRouterUrl` | WS 连接地址 |
@@ -409,7 +409,7 @@ data: {"id":"chatcmpl-xxx","choices":[{"delta":{"content":"..."}}]}
   "plugin_id": "xrl-router-plugin-wukong",
   "provider": {
     "kind": "openai",
-    "base_url": "http://localhost:19067",
+    "base_url": "http://localhost:19066",
     "api_path": "/v1/chat/completions"
   },
   "models": [
@@ -430,7 +430,7 @@ data: {"id":"chatcmpl-xxx","choices":[{"delta":{"content":"..."}}]}
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `PORT` | `19067` | HTTP 监听端口 |
+| `QWEN_PORT` / `WUKONG_PORT` | qwenwork: `19067`；wukong: `19066` | 按通道的 HTTP 监听端口（默认不同 → 两通道可同时启动；不再支持共用 `PORT`） |
 | `AVAILABLE_MODELS` | 按通道默认（qwenwork: `qwork-advanced,qwork-auto,qwork-lite,qmodel_latest`；wukong: `qwen3.7-max,qwen3.7-plus`） | 逗号分隔的可用模型列表 |
 | `XRL_ROUTER_URL` | `http://localhost:19068` | xrl-router WS 连接地址 |
 

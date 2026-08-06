@@ -801,7 +801,7 @@ function cleanup(success: boolean): void {
     if (!writeEnv(key)) { process.exitCode = 1; return; }
 
     console.log(`\n🎉 完成！抓到 key ${mask(key)} 并已写入 WUKONG_KEYS。`);
-    console.log('   重启代理后生效：lsof -ti :19067 | xargs kill -9; pnpm serve\n');
+    console.log('   重启代理后生效：lsof -ti :19066 | xargs kill -9; pnpm serve:wukong（Windows：pnpm 重新运行 serve:wukong 时会自动释放端口）\n');
     success = true;
   } finally {
     cleanup(success);

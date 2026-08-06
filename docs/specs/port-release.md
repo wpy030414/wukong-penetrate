@@ -7,7 +7,7 @@
 ## 输入输出
 
 **输入：**
-- `port`：目标端口号（默认 19067，来自 `settings.port`）
+- `port`：目标端口号（qwenwork 默认 19067 / wukong 默认 19066，来自 `settings.port`，见 config-channel）
 
 **输出：**
 - Promise<void>：端口已释放（或本就空闲）时 resolve
@@ -61,6 +61,12 @@ const netstat = spawn('netstat', ['-ano']);
 - `lsof` / `netstat` 异常 → resolve（不 reject）
 - **Promise 永不 reject** — 端口释放是 best-effort，不应阻塞启动
 
+### 排除自身进程
+
+PID 列表中剔除 `process.pid`（两平台都适用）：若目标端口正是本进程在监听（热重启/重复启动），不自杀，直接 resolve 后由 `app.listen()` 报 EADDRINUSE 交给上层喵～
+
+两通道默认端口不同（19067 / 19066），`killPortProcess` 只作用于本通道自己的端口，启动一个通道不会杀掉另一个通道喵。
+
 ## 验收标准
 
 - [ ] 端口被占用 → 杀死进程 → `app.listen()` 成功
@@ -68,6 +74,8 @@ const netstat = spawn('netstat', ['-ano']);
 - [ ] macOS：`lsof` 找到多个 PID → 全部 kill -9
 - [ ] Windows：`netstat` 找到多个 LISTENING 行 → 去重 PID → 全部 taskkill
 - [ ] `killPortProcess` 不会 throw / reject
+- [ ] 端口被本进程自身占用 → 不自杀（剔除 `process.pid` 后无 PID → resolve）
+- [ ] 两通道分别启动 → 各自只 kill 自己端口上的进程，互不干扰
 
 ## 已知边界
 

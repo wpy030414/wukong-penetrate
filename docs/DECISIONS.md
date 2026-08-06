@@ -3,7 +3,7 @@
 > 本文件记录 wukong-penetrate 项目关键设计决策背后的**历史原因**，防止架构漂移。
 > 每条决策回答的是「为什么」而非「怎么做」。
 
-版本：0.2.0 | 最后更新：2026-08-05
+版本：0.3.0 | 最后更新：2026-08-06
 
 ---
 
@@ -204,3 +204,19 @@
 **决策**：`serve` 和 `serve:wukong` 改为 `tsx`（无 watch），文件变更需手动重启。
 
 **证据**：`package.json` scripts 字段
+
+---
+
+## D-13: 为什么两通道默认端口不同（19067 / 19066）？
+
+**背景**：最初两通道共用 `PORT`（默认 19067），且 `startServer()` 启动前会 `killPortProcess()` 强杀占用该端口的进程喵～
+
+**问题**：
+- 双通道同时运行时，后启动的通道会杀掉先启动的通道（共用端口 + kill 前置逻辑）
+- xrl-router 收到两份指向同一端口的注册，但实际只有一个通道存活，请求分发到已死通道
+
+**决策**：按通道分配默认端口 —— qwenwork `19067`（保持向后兼容）、wukong `19066`。各通道只读专用键 `QWEN_PORT` / `WUKONG_PORT`，**不再支持共用 `PORT`**（避免两通道取到同一端口冲突）；`killPortProcess()` 剔除 `process.pid` 防止自杀喵。
+
+**收益**：`pnpm serve` 与 `pnpm serve:wukong` 可同时运行、各自向 xrl-router 注册独立 `base_url`，互不干扰喵。
+
+**证据**：`src/config.ts`（`resolvePort()`）、`src/index.ts`（`killPortProcess` 排除自身 PID + 启动日志）

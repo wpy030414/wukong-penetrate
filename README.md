@@ -10,10 +10,12 @@
 
 ## 双通道一览
 
-| 通道 | 启动 | 后端 | 密钥 | 特性 |
-|------|------|------|------|------|
-| **qwenwork**（默认）| `pnpm serve` | 千问办公 → **智谱 glm-5.2** / Qwen3.7-plus / DeepSeek-V4-flash / Qwen3.8-max | 自动管理：`auth-v2.dat`(safeStorage) + `deviceToken/refresh` 按需刷新 + 文件监听自动拾取 + 双向同步 | 千问 App 后台运行即可，几乎不用重新登录（[逆向成果](./docs/reverse/QWENWORKCN_REVERSE.md)）|
-| **wukong** | `pnpm serve:wukong` | 钉钉悟空 DEAP | `WUKONG_KEYS`（`pnpm capture-key:wukong` 抓取）| 注入 DEAP 业务头 + 按行 flush 流式（[逆向成果](./docs/reverse/WUKONG_REVERSE.md)）|
+| 通道 | 启动 | 默认端口 | 后端 | 密钥 | 特性 |
+|------|------|------|------|------|------|
+| **qwenwork**（默认）| `pnpm serve` | `19067` | 千问办公 → **智谱 glm-5.2** / Qwen3.7-plus / DeepSeek-V4-flash / Qwen3.8-max | 自动管理：`auth-v2.dat`(safeStorage) + `deviceToken/refresh` 按需刷新 + 文件监听自动拾取 + 双向同步 | 千问 App 后台运行即可，几乎不用重新登录（[逆向成果](./docs/reverse/QWENWORKCN_REVERSE.md)）|
+| **wukong** | `pnpm serve:wukong` | `19066` | 钉钉悟空 DEAP | `WUKONG_KEYS`（`pnpm capture-key:wukong` 抓取）| 注入 DEAP 业务头 + 按行 flush 流式（[逆向成果](./docs/reverse/WUKONG_REVERSE.md)）|
+
+两通道默认端口不同（`QWEN_PORT` / `WUKONG_PORT` 可分别覆盖），可以**分别同时启动**，互不干扰喵～
 
 本插件自身不跑任何模型，全部能力来自远端网关喵～
 
@@ -47,9 +49,10 @@ pnpm serve:wukong
 ## 验证
 
 ```bash
-curl http://localhost:19067/health
-# qwenwork → {"status":"healthy","channel":"qwenwork","backend":"qwenwork","base_url":"https://gateway.qwenwork.cn"}
-# wukong   → {"status":"healthy","channel":"wukong","backend":"deap","base_url":"https://api-deap.dingtalk.com/dingtalk/v1"}
+curl http://localhost:19067/health   # qwenwork 通道
+# → {"status":"healthy","channel":"qwenwork","backend":"qwenwork","base_url":"https://gateway.qwenwork.cn"}
+curl http://localhost:19066/health   # wukong 通道
+# → {"status":"healthy","channel":"wukong","backend":"deap","base_url":"https://api-deap.dingtalk.com/dingtalk/v1"}
 ```
 
 ## 技术栈

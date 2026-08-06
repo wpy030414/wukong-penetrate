@@ -268,7 +268,7 @@
 
 ### 8.3 共享骨架
 
-- [ ] 端口释放：启动前自动 kill 占用 19067 端口的进程
+- [ ] 端口释放：启动前自动 kill 占用本通道端口（qwenwork 19067 / wukong 19066）的进程，且不杀另一通道的进程
 - [ ] 优雅退出：SIGTERM/SIGINT 关闭 WebSocket + 停止心跳和轮询
 - [ ] `GET /` 返回服务信息（version、channel、backend、endpoints）
 

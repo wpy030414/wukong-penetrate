@@ -25,9 +25,11 @@ app.use(express.json({ limit: '50mb' }));
 
 /**
  * 检测并释放指定端口（跨平台支持）
+ * 排除自身 PID（process.pid）：端口被本进程占用时（如热重启/重复启动），不自杀喵～
  */
 async function killPortProcess(port: number): Promise<void> {
   const isWindows = process.platform === 'win32';
+  const selfPid = String(process.pid);
   return new Promise((resolve) => {
     if (isWindows) {
       const netstat = spawn('netstat', ['-ano']);
@@ -39,7 +41,7 @@ async function killPortProcess(port: number): Promise<void> {
           if (line.includes(`:${port}`) && line.includes('LISTENING')) {
             const parts = line.trim().split(/\s+/);
             const pid = parts[parts.length - 1];
-            if (pid && !pids.includes(pid)) pids.push(pid);
+            if (pid && pid !== selfPid && !pids.includes(pid)) pids.push(pid);
           }
         }
         if (pids.length === 0) return resolve();
@@ -53,7 +55,8 @@ async function killPortProcess(port: number): Promise<void> {
       lsof.stderr.on('data', () => {});
       lsof.on('close', (code) => {
         if (code === 0 && pids.trim()) {
-          const pidList = pids.trim().split('\n').filter(Boolean);
+          const pidList = pids.trim().split('\n').filter((p) => p.trim() && p.trim() !== selfPid);
+          if (pidList.length === 0) return resolve();
           const kill = spawn('kill', ['-9', ...pidList]);
           kill.on('close', () => resolve());
         } else {
@@ -117,6 +120,7 @@ async function startServer() {
 
   await killPortProcess(port);
   app.listen(port, host, () => {
+    console.log(`[${CHANNEL}] listening on http://localhost:${port} (pid ${process.pid})`);
     // 启动 PluginClient（自动连接 xrl-router 并注册）
     const pluginClient = new PluginClient();
 

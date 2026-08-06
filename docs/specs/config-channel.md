@@ -41,7 +41,7 @@ function parseChannel(): Channel {
 
 | 环境变量 | 字段 | 默认值 |
 |---|---|---|
-| `PORT` | `port` | `19067` |
+| `QWEN_PORT`（qwenwork）/ `WUKONG_PORT`（wukong） | `port`（按通道读专用键，不支持共用 `PORT`） | qwenwork: `19067`；wukong: `19066` |
 | `AVAILABLE_MODELS` | `availableModels` | qwenwork: `qwork-advanced,qwork-auto,qwork-lite,qmodel_latest`；wukong: `qwen3.7-max,qwen3.7-plus` |
 | `XRL_ROUTER_URL` | `xrlRouterUrl` | `http://localhost:19068` |
 
@@ -98,6 +98,8 @@ function env(key: string, fallback: string): string {
 - [ ] `pnpm serve`（无参数）→ `CHANNEL === 'qwenwork'`
 - [ ] `pnpm serve -- --use wukong` → `CHANNEL === 'wukong'`
 - [ ] `settings.port` 为数字类型（`parseInt`）
+- [ ] 未设任何端口变量 → qwenwork 端口 `19067`、wukong 端口 `19066`（可同时启动）
+- [ ] 设 `WUKONG_PORT=19070` → wukong 端口 `19070`，qwenwork 不受影响；设共用 `PORT` 不生效（不再支持）
 - [ ] `settings.availableModels` 为去空格的字符串数组
 - [ ] 设置 `DEAP_BASE_URL=https://custom.api` → `settings.deapBaseUrl` 为该值
 - [ ] 未设 `DEAP_BASE_URL` → 默认 `https://api-deap.dingtalk.com/dingtalk/v1`

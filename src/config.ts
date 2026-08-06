@@ -84,8 +84,17 @@ function env(key: string, fallback: string): string {
   return v !== undefined && v !== '' ? v : fallback;
 }
 
+/**
+ * 解析监听端口：两通道默认端口不同（qwenwork 19067 / wukong 19066），可分别同时启动喵。
+ * 各通道只读专用键（QWEN_PORT / WUKONG_PORT），不再支持共用 PORT——避免两通道取到同一端口冲突喵。
+ */
+function resolvePort(): number {
+  const key = CHANNEL === 'wukong' ? 'WUKONG_PORT' : 'QWEN_PORT';
+  return parseInt(env(key, CHANNEL === 'wukong' ? '19066' : '19067'), 10);
+}
+
 export const settings: Settings = {
-  port: parseInt(env('PORT', '19067'), 10),
+  port: resolvePort(),
   availableModels: (process.env.AVAILABLE_MODELS || (CHANNEL === 'qwenwork'
     ? 'qwork-advanced,qwork-auto,qwork-lite,qmodel_latest'
     : 'qwen3.7-max,qwen3.7-plus'))
